@@ -9,7 +9,7 @@ services:
     restart: unless-stopped
 
   x-downloader-bot:
-    build: .
+    image: orangeqiu/x-downloader-bot:latest
     ports:
       - "3000:3000"
     environment:
