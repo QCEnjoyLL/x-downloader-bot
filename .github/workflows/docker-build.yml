@@ -11,12 +11,67 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      - name: Read version from package.json
-        id: version
+      - name: Auto-bump version
+        id: bump
         run: |
-          VERSION=$(node -p "require('./package.json').version")
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          # 读取当前版本
+          CURRENT=$(node -p "require('./package.json').version")
+          echo "current=$CURRENT" >> $GITHUB_OUTPUT
+
+          # 获取本次 push 的所有 commit 消息
+          if [ "${{ github.event.before }}" = "0000000000000000000000000000000000000000" ]; then
+            # 首次 push，看最近一次 commit
+            MSGS=$(git log -1 --pretty=%B)
+          else
+            MSGS=$(git log ${{ github.event.before }}..${{ github.event.after }} --pretty=%B)
+          fi
+
+          echo "=== Commit messages ==="
+          echo "$MSGS"
+          echo "======================="
+
+          # 判定 bump 类型
+          BUMP="patch"
+          if echo "$MSGS" | grep -qiE '(BREAKING CHANGE|!:)'; then
+            BUMP="major"
+          elif echo "$MSGS" | grep -qiE '^feat[\(:)]'; then
+            BUMP="minor"
+          elif echo "$MSGS" | grep -qiE '^fix[\(:)]'; then
+            BUMP="patch"
+          fi
+          echo "bump=$BUMP" >> $GITHUB_OUTPUT
+
+          # 计算新版本
+          IFS='.' read -r MAJ MIN PAT <<< "$CURRENT"
+          case $BUMP in
+            major) MAJ=$((MAJ + 1)); MIN=0; PAT=0 ;;
+            minor) MIN=$((MIN + 1)); PAT=0 ;;
+            patch) PAT=$((PAT + 1)) ;;
+          esac
+          NEW="$MAJ.$MIN.$PAT"
+          echo "new=$NEW" >> $GITHUB_OUTPUT
+          echo "Bumping $CURRENT → $NEW ($BUMP)"
+
+      - name: Update package.json version
+        run: |
+          NEW="${{ steps.bump.outputs.new }}"
+          node -e "
+            const p = require('./package.json');
+            p.version = '$NEW';
+            require('fs').writeFileSync('./package.json', JSON.stringify(p, null, 2) + '\n');
+          "
+          cat package.json | grep version
+
+      - name: Commit version bump
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add package.json
+          git commit -m "chore: bump version to v${{ steps.bump.outputs.new }} [skip ci]" || true
+          git push origin master || true
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -37,7 +92,7 @@ jobs:
           images: ${{ secrets.DOCKERHUB_USERNAME }}/x-downloader-bot
           tags: |
             type=raw,value=latest
-            type=raw,value=${{ steps.version.outputs.version }}
+            type=raw,value=v${{ steps.bump.outputs.new }}
 
       - name: Build and push
         uses: docker/build-push-action@v5
