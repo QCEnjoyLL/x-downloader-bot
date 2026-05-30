@@ -1,13 +1,14 @@
 // X Downloader Bot for Telegram — Docker 部署版
 // 使用 fxtwitter 和 vxtwitter API 提取视频和图片
 
-import { writeFile, mkdir } from 'node:fs/promises';
+import { writeFile, mkdir, rm } from 'node:fs/promises';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { getUserMode, setUserMode, getUserQuality, setUserQuality } from './store.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DOWNLOADS_DIR = process.env.DOWNLOADS_DIR || join(__dirname, '..', 'downloads');
+const CLEANUP_VIDEOS = process.env.CLEANUP_VIDEOS !== 'false';  // 默认 true
 
 // ==================== 工具函数 ====================
 
@@ -853,12 +854,13 @@ async function processTwitterUrlDownload(originalUrl, chatId, statusMessageId) {
             // 策略2: 下载后上传
             await updateStatusMessage(chatId, statusMessageId,
               `📥 下载视频 ${i + 1}/${mediaData.videos.length}${tryInfo}...`);
+            let savedPath = null;
             try {
               const file = await downloadFile(tryUrl, MAX_VIDEO_SIZE);
 
               const timestamp = Date.now();
               const filename = `twitter_${username}_${statusId}_${timestamp}.mp4`;
-              saveToDisk(filename, file.buffer).catch(() => {});
+              savedPath = await saveToDisk(filename, file.buffer);
 
               await updateStatusMessage(chatId, statusMessageId,
                 `📤 上传视频 ${i + 1}/${mediaData.videos.length} ` +
@@ -866,14 +868,25 @@ async function processTwitterUrlDownload(originalUrl, chatId, statusMessageId) {
               videoSent = await uploadVideoFile(
                 chatId, file.buffer, file.contentType, videoCaption, video.thumbnailUrl
               );
-              if (videoSent) break;
+
+              if (videoSent) {
+                // 上传成功，根据 CLEANUP_VIDEOS 决定是否删除本地文件
+                if (CLEANUP_VIDEOS && savedPath) {
+                  await cleanupFile(savedPath);
+                }
+                break;
+              }
 
               // 策略3: 作为文档上传
               videoSent = await uploadDocumentFile(
                 chatId, file.buffer, 'video.mp4', file.contentType, videoCaption
               );
+              if (videoSent && CLEANUP_VIDEOS && savedPath) {
+                await cleanupFile(savedPath);
+              }
             } catch (downloadErr) {
               console.error('Video attempt failed:', downloadErr);
+              // 下载/上传失败，保留文件不删除
             }
           }
 
@@ -1074,9 +1087,20 @@ async function saveToDisk(filename, buffer) {
     await mkdir(DOWNLOADS_DIR, { recursive: true });
     const filepath = join(DOWNLOADS_DIR, filename);
     await writeFile(filepath, new Uint8Array(buffer));
-    console.log(`Saved to disk: ${filepath}`);
+    console.log(`Saved: ${filepath}`);
+    return filepath;
   } catch (err) {
     console.error('Failed to save file to disk:', err.message);
+    return null;
+  }
+}
+
+async function cleanupFile(filepath) {
+  try {
+    await rm(filepath);
+    console.log(`Cleaned up: ${filepath}`);
+  } catch (err) {
+    console.error('Failed to delete file:', err.message);
   }
 }
 

@@ -100,8 +100,8 @@ docker compose up -d
 
 ```
 .
-├── data/prefs.json      # 用户偏好
-├── downloads/           # 下载的视频文件
+├── data/prefs.json      # 用户偏好（首次使用 /mode 或 /quality 后生成）
+├── downloads/           # 下载的视频文件（上传失败会保留）
 ├── telegram-api/        # 本地 API 缓存
 └── .env                 # 环境变量
 ```
@@ -113,6 +113,7 @@ docker compose up -d
 | `BOT_TOKEN` | Telegram Bot Token | — |
 | `POLLING` | 轮询模式 | `true` |
 | `PORT` | 服务端口 | `3000` |
+| `CLEANUP_VIDEOS` | 上传成功后删除本地视频 | `true` |
 | `TELEGRAM_API_ID` | 本地 API ID（可选） | — |
 | `TELEGRAM_API_HASH` | 本地 API Hash（可选） | — |
 | `TELEGRAM_API_URL` | API 地址 | `https://api.telegram.org` |
