@@ -108,6 +108,23 @@ export async function handleTelegramWebhook(update) {
         return;
       }
 
+      // 检查是否包含视频直链（如 video.twimg.com/xxx.mp4）
+      const directUrls = extractDirectVideoUrls(messageText);
+      if (directUrls.length > 0) {
+        console.log('Found direct video URLs:', directUrls);
+        const mode = await getUserMode(chatId);
+        if (mode === 'download') {
+          const statusMsgId = await sendMessage(chatId, '🔍 检测到视频直链，正在下载...');
+          processDirectVideoUrls(directUrls, chatId, statusMsgId).catch(error => {
+            console.error('Error processing direct URLs:', error);
+            sendMessage(chatId, `❌ 处理出错: ${error.message}`).catch(() => {});
+          });
+        } else {
+          await sendMessage(chatId, '🔗 检测到视频直链：\n' + directUrls.join('\n'));
+        }
+        return;
+      }
+
       // 检查是否包含 Twitter/X 链接
       const twitterUrls = extractTwitterUrls(messageText);
 
@@ -139,11 +156,11 @@ export async function handleTelegramWebhook(update) {
       } else {
         // 如果没有找到 Twitter 链接，给出提示
         await sendMessage(chatId,
-          '❌ 未检测到 Twitter/X 链接。\n\n' +
-          '请发送包含以下格式的链接：\n' +
-          '• https://twitter.com/用户名/status/123\n' +
-          '• https://x.com/用户名/status/123\n\n' +
-          '💡 使用 /mode 切换下载模式，可直接获取视频文件！'
+          '❌ 未检测到有效链接。\n\n' +
+          '支持的格式：\n' +
+          '• Twitter/X 链接：x.com/用户/status/123\n' +
+          '• 视频直链：video.twimg.com/xxx.mp4\n\n' +
+          '💡 默认 📥下载+🎯最高清模式'
         );
       }
     }
@@ -156,6 +173,72 @@ export async function handleTelegramWebhook(update) {
 function extractTwitterUrls(text) {
   const twitterRegex = /https?:\/\/(twitter\.com|x\.com)\/\w+\/status\/\d+/g;
   return text.match(twitterRegex) || [];
+}
+
+// 匹配视频直链：video.twimg.com、.mp4、.mov 等
+function extractDirectVideoUrls(text) {
+  const patterns = [
+    /https?:\/\/[^\s]+\.(mp4|mov|avi|webm|mkv)(\?[^\s]*)?/gi,
+    /https?:\/\/video\.twimg\.com\/[^\s]+/gi,
+    /https?:\/\/[^\s]*twitter[^\s]*\.(mp4|m3u8)(\?[^\s]*)?/gi,
+  ];
+  const urls = [];
+  for (const pattern of patterns) {
+    const matches = text.match(pattern);
+    if (matches) urls.push(...matches);
+  }
+  return [...new Set(urls)]; // 去重
+}
+
+// 处理视频直链：直接下载上传，跳过 API 解析
+async function processDirectVideoUrls(urls, chatId, statusMsgId) {
+  const MAX_SIZE = getMaxVideoSize();
+
+  for (let i = 0; i < urls.length; i++) {
+    const url = urls[i];
+    const label = urls.length > 1 ? ` [${i + 1}/${urls.length}]` : '';
+
+    await updateStatusMessage(chatId, statusMsgId,
+      `📥 下载视频${label}...`);
+
+    try {
+      const file = await downloadFile(url, MAX_SIZE);
+
+      // 从 URL 提取文件名
+      const urlPath = new URL(url).pathname;
+      const filename = urlPath.split('/').pop() || `video_${Date.now()}.mp4`;
+
+      const savedPath = await saveToDisk(filename, file.buffer);
+
+      await updateStatusMessage(chatId, statusMsgId,
+        `📤 上传视频${label} (${formatFileSize(file.size)})...`);
+
+      let videoSent = await uploadVideoFile(
+        chatId, file.buffer, file.contentType,
+        `🎬 视频直链${label}`, null, 0, 0
+      );
+
+      if (!videoSent) {
+        videoSent = await uploadDocumentFile(
+          chatId, file.buffer, filename, file.contentType,
+          `🎬 视频直链${label}`
+        );
+      }
+
+      if (videoSent && CLEANUP_VIDEOS && savedPath) {
+        await cleanupFile(savedPath);
+      }
+
+      if (!videoSent) {
+        await sendMessage(chatId, `⚠️ 上传失败，直链：${url}`);
+      }
+    } catch (err) {
+      console.error('Direct video download failed:', err.message);
+      await sendMessage(chatId, `❌ 下载失败: ${err.message}\n直链：${url}`);
+    }
+  }
+
+  await updateStatusMessage(chatId, statusMsgId, '✅ 处理完成！');
 }
 
 async function processTwitterUrl(originalUrl, chatId) {
