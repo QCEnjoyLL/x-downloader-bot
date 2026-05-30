@@ -6,7 +6,7 @@ import { getUserMode, setUserMode, getUserQuality, setUserQuality } from './stor
 // ==================== 工具函数 ====================
 
 function getBotToken() {
-  return process.getBotToken() || '';
+  return process.env.BOT_TOKEN || '';
 }
 
 function formatFileSize(bytes) {
