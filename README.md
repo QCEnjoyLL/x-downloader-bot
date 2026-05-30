@@ -2,7 +2,7 @@
 
 > Telegram 机器人 — 自动提取 Twitter/X 视频和图片，直接下载发送最高清文件。
 
-[![Docker Pulls](https://img.shields.io/docker/pulls/yourusername/x-downloader-bot)](https://hub.docker.com/r/yourusername/x-downloader-bot)
+[![Docker Pulls](https://img.shields.io/docker/pulls/orangeqiu/x-downloader-bot)](https://hub.docker.com/r/orangeqiu/x-downloader-bot)
 
 ## 功能
 
@@ -23,10 +23,10 @@
 
 ```bash
 # 从 Docker Hub 拉取
-docker pull yourusername/x-downloader-bot
+docker pull orangeqiu/x-downloader-bot
 
 # 或用 docker-compose
-wget https://raw.githubusercontent.com/yourusername/x-downloader-bot/main/docker-compose.yml
+wget https://raw.githubusercontent.com/orangeqiu/x-downloader-bot/main/docker-compose.yml
 echo "BOT_TOKEN=你的token" > .env
 docker compose up -d
 ```
