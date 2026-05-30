@@ -27,8 +27,8 @@
 docker run -d \
   --name x-downloader-bot \
   -e BOT_TOKEN=你的token \
+  -e POLLING=true \
   -v $(pwd)/data:/app/data \
-  -p 3000:3000 \
   --restart unless-stopped \
   orangeqiu/x-downloader-bot:latest
 ```
@@ -41,11 +41,14 @@ echo "BOT_TOKEN=你的token" > .env
 docker compose up -d
 ```
 
-### 3. 设置 Webhook
+### 3. 两种运行模式
 
-浏览器打开 `http://你的服务器IP:3000/setup-webhook`，点击设置按钮即可。
+| 模式 | 说明 | 适用场景 |
+|------|------|----------|
+| **轮询**（默认） | 主动拉取消息，`POLLING=true` | 内网、无公网 IP、懒人首选 |
+| Webhook | Telegram 推送消息，需要 HTTPS | 有公网域名+证书 |
 
-> Telegram 要求 webhook URL 必须是 **HTTPS**。建议 nginx 反向代理 + Let's Encrypt，或 [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/)。
+轮询模式启动即用，无需额外配置。Webhook 模式需先在页面上设置：`http://你的IP:3000/setup-webhook`。
 
 ## 命令
 
