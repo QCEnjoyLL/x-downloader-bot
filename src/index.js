@@ -874,23 +874,32 @@ async function processTwitterUrlDownload(originalUrl, chatId, statusMessageId) {
       return;
     }
 
+    const isMixed = mediaData.type === 'mixed';
+
+    // 混合内容：先单独发送推文文本
+    if (isMixed) {
+      await sendMessage(chatId, baseText);
+    }
+
     // 处理图片
     if (mediaData.photos && mediaData.photos.length > 0) {
-      await updateStatusMessage(chatId, statusMessageId,
-        `🖼️ 正在发送 ${mediaData.photos.length} 张图片...`);
+      const photoLabel = isMixed
+        ? `🖼️ 图片 (${mediaData.photos.length}张) + 🎬 视频 (${mediaData.videos?.length || 0}个)`
+        : `🖼️ 正在发送 ${mediaData.photos.length} 张图片...`;
+      await updateStatusMessage(chatId, statusMessageId, photoLabel);
 
       for (let i = 0; i < mediaData.photos.length; i++) {
         const photo = mediaData.photos[i];
-        const caption = mediaData.photos.length === 1
-          ? `📸 ${baseText}`
-          : `📸 图片 ${i + 1}/${mediaData.photos.length}`;
+        const caption = isMixed
+          ? `📸 图片 ${i + 1}/${mediaData.photos.length}`
+          : mediaData.photos.length === 1
+            ? `📸 ${baseText}`
+            : `📸 图片 ${i + 1}/${mediaData.photos.length}`;
 
         await sendChatAction(chatId, 'upload_photo');
 
-        // 图片优先 URL 直传
         const sent = await sendPhoto(chatId, photo.url, caption);
         if (!sent) {
-          // URL 直传失败，下载后上传
           await updateStatusMessage(chatId, statusMessageId,
             `📥 下载图片 ${i + 1}/${mediaData.photos.length}...`);
           try {
@@ -906,8 +915,10 @@ async function processTwitterUrlDownload(originalUrl, chatId, statusMessageId) {
 
     // 处理视频
     if (mediaData.videos && mediaData.videos.length > 0) {
-      await updateStatusMessage(chatId, statusMessageId,
-        `🎬 正在处理 ${mediaData.videos.length} 个视频...`);
+      const videoLabel = isMixed
+        ? `🎬 视频 (${mediaData.videos.length}个) + 🖼️ 图片 (${mediaData.photos?.length || 0}张)`
+        : `🎬 正在处理 ${mediaData.videos.length} 个视频...`;
+      await updateStatusMessage(chatId, statusMessageId, videoLabel);
 
       for (let i = 0; i < mediaData.videos.length; i++) {
         const video = mediaData.videos[i];
@@ -920,7 +931,7 @@ async function processTwitterUrlDownload(originalUrl, chatId, statusMessageId) {
         const videoCaption = `🎬 视频 ${i + 1}/${mediaData.videos.length}\n` +
           `📐 质量: ${video.quality || '未知'}\n` +
           `⏱️ 时长: ${video.duration || '未知'}` +
-          `${mediaData.videos.length === 1 ? '\n\n' + baseText : ''}`;
+          `${(mediaData.videos.length === 1 && !isMixed) ? '\n\n' + baseText : ''}`;
 
         await sendChatAction(chatId, 'upload_video');
 
