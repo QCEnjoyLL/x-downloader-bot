@@ -60,6 +60,11 @@ app.listen(PORT, () => {
     process.exit(1);
   }
   console.log(`✅ BOT_TOKEN 已配置 (${BOT_TOKEN.substring(0, 10)}...)`);
+  console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+  console.log('  🤖 X Downloader Bot');
+  console.log('  默认：📥 下载模式 + 🎯 最高清');
+  console.log('  Telegram 发送 /start 查看使用方法');
+  console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
 
   if (POLLING) {
     console.log('🔄 轮询模式已启动（无需设置 Webhook）');

@@ -79,15 +79,19 @@ export async function handleTelegramWebhook(update) {
       // 处理 /start 命令
       if (messageText === '/start') {
         await sendMessage(chatId,
-          '🤖 X 媒体机器人已启动！\n\n' +
-          '发送包含 Twitter/X 链接的消息，我会帮你提取视频和图片。\n\n' +
-          '支持的命令：\n' +
-          '• /mode - 查看或切换模式（链接/下载）\n' +
-          '• /quality - 查看或设置视频画质\n\n' +
-          '支持的链接格式：\n' +
-          '• https://twitter.com/username/status/123\n' +
-          '• https://x.com/username/status/123\n\n' +
-          '💡 默认使用 📥下载+最高清 模式，直接发送 /mode 查看'
+          '🤖 X Downloader Bot\n\n' +
+          '直接发送 Twitter/X 链接，我帮你下载最高清视频！\n\n' +
+          '📋 使用方法：\n' +
+          '1️⃣ 复制 Twitter/X 推文链接\n' +
+          '2️⃣ 粘贴发给我\n' +
+          '3️⃣ 等待下载上传，接收视频文件\n\n' +
+          '🔗 支持格式：\n' +
+          '• x.com/用户/status/推文ID\n' +
+          '• twitter.com/用户/status/推文ID\n\n' +
+          '⚙️ 命令：\n' +
+          '/mode — 切换下载/链接模式\n' +
+          '/quality — 调整视频画质（高/中/低）\n\n' +
+          '💡 默认：📥下载模式 + 🎯最高清'
         );
         return;
       }
