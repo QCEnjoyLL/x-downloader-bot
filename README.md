@@ -57,6 +57,12 @@ docker compose logs -f
 
 发送 `/start` 给机器人，收到回复就 OK。
 
+### 4. 更新
+
+```bash
+docker compose pull && docker compose up -d
+```
+
 ## 两种运行模式
 
 | 模式 | 说明 |
