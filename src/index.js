@@ -834,26 +834,30 @@ async function processTwitterUrlDownload(originalUrl, chatId, statusMessageId) {
         const selected = selectVideoVariant(video, qualityPreference, MAX_VIDEO_SIZE);
 
         if (selected.url && !selected.reason) {
-          const estimatedInfo = selected.estimatedSize
-            ? ` (约 ${formatFileSize(selected.estimatedSize)})`
-            : '';
+          const urlsToTry = [selected.url, ...(selected.fallbacks || [])];
+          let videoSent = false;
+          let triedUrl = '';
 
-          // 策略1: URL 直传（Telegram 自行下载）
-          await updateStatusMessage(chatId, statusMessageId,
-            `📤 上传视频 ${i + 1}/${mediaData.videos.length}${estimatedInfo}...`);
-          let videoSent = await sendVideoByUrl(chatId, selected.url, videoCaption);
+          for (const tryUrl of urlsToTry) {
+            triedUrl = tryUrl;
+            const tryInfo = tryUrl === selected.url && selected.estimatedSize
+              ? ` (约 ${formatFileSize(selected.estimatedSize)})`
+              : '';
 
-          if (!videoSent) {
+            // 策略1: URL 直传
+            await updateStatusMessage(chatId, statusMessageId,
+              `📤 上传视频 ${i + 1}/${mediaData.videos.length}${tryInfo}...`);
+            videoSent = await sendVideoByUrl(chatId, tryUrl, videoCaption);
+            if (videoSent) break;
+
             // 策略2: 下载后上传
             await updateStatusMessage(chatId, statusMessageId,
-              `📥 下载视频 ${i + 1}/${mediaData.videos.length}${estimatedInfo}...`);
+              `📥 下载视频 ${i + 1}/${mediaData.videos.length}${tryInfo}...`);
             try {
-              const file = await downloadFile(selected.url, MAX_VIDEO_SIZE);
+              const file = await downloadFile(tryUrl, MAX_VIDEO_SIZE);
 
-              // 保存到磁盘
               const timestamp = Date.now();
-              const ext = file.contentType.includes('mp4') ? 'mp4' : 'mp4';
-              const filename = `twitter_${username}_${statusId}_${timestamp}.${ext}`;
+              const filename = `twitter_${username}_${statusId}_${timestamp}.mp4`;
               saveToDisk(filename, file.buffer).catch(() => {});
 
               await updateStatusMessage(chatId, statusMessageId,
@@ -862,28 +866,22 @@ async function processTwitterUrlDownload(originalUrl, chatId, statusMessageId) {
               videoSent = await uploadVideoFile(
                 chatId, file.buffer, file.contentType, videoCaption, video.thumbnailUrl
               );
-            } catch (downloadErr) {
-              console.error('Video download failed:', downloadErr);
-            }
+              if (videoSent) break;
 
-            if (!videoSent) {
-              // 策略3: 作为文档上传（兜底）
-              try {
-                const file = await downloadFile(selected.url, MAX_VIDEO_SIZE);
-                saveToDisk(`twitter_${username}_${statusId}_${Date.now()}.mp4`, file.buffer).catch(() => {});
-                await uploadDocumentFile(
-                  chatId, file.buffer, 'video.mp4', file.contentType, videoCaption
-                );
-              } catch (docErr) {
-                console.error('Document upload also failed:', docErr);
-              }
+              // 策略3: 作为文档上传
+              videoSent = await uploadDocumentFile(
+                chatId, file.buffer, 'video.mp4', file.contentType, videoCaption
+              );
+            } catch (downloadErr) {
+              console.error('Video attempt failed:', downloadErr);
             }
           }
 
-          // 无论上传成功与否，最后发送多清晰度链接
-          if (video.variants && video.variants.length > 1) {
+          if (!videoSent) {
+            // 所有尝试都失败，发送链接
             await sendVideoLinks(chatId, video, i, mediaData.videos.length);
-          } else if (!videoSent) {
+          } else if (video.variants && video.variants.length > 1) {
+            // 上传成功，附带多清晰度链接
             await sendVideoLinks(chatId, video, i, mediaData.videos.length);
           }
         } else if (selected.reason === 'all_too_large') {
@@ -938,20 +936,22 @@ function selectVideoVariant(video, qualityPreference, maxSizeBytes) {
         };
       });
 
-    // 预过滤：移除预估超限的 variant
-    const fittingCandidates = candidates.filter(c => {
-      if (c.estimatedSize === null) return true; // 无法估算的保留
-      return c.estimatedSize <= maxSizeBytes;
-    });
+    // 高画质：取最高码率，不预过滤（由下载层实际检测大小）
+    // 中/低画质：预过滤掉明显超限的 variant
+    if (qualityPreference !== 'high') {
+      const fittingCandidates = candidates.filter(c => {
+        if (c.estimatedSize === null) return true;
+        return c.estimatedSize <= maxSizeBytes;
+      });
 
-    // 如果所有 variant 都预估算超限，直接放弃
-    if (candidates.length > 0 && fittingCandidates.length === 0) {
-      const minEstimated = Math.min(...candidates.map(c => c.estimatedSize || Infinity));
-      console.log(`All variants estimated too large. Min estimated: ${formatFileSize(minEstimated)}, max allowed: ${formatFileSize(maxSizeBytes)}`);
-      return { url: null, reason: 'all_too_large', minEstimatedSize: minEstimated };
+      if (candidates.length > 0 && fittingCandidates.length === 0) {
+        const minEstimated = Math.min(...candidates.map(c => c.estimatedSize || Infinity));
+        console.log(`All variants estimated too large. Min estimated: ${formatFileSize(minEstimated)}, max allowed: ${formatFileSize(maxSizeBytes)}`);
+        return { url: null, reason: 'all_too_large', minEstimatedSize: minEstimated };
+      }
+
+      candidates = fittingCandidates.length > 0 ? fittingCandidates : candidates;
     }
-
-    candidates = fittingCandidates.length > 0 ? fittingCandidates : candidates;
 
   } else if (video.url) {
     // vxtwitter 单一 URL，无法预估大小
@@ -985,7 +985,11 @@ function selectVideoVariant(video, qualityPreference, maxSizeBytes) {
     url: selected.url,
     reason: null,
     estimatedSize: selected.estimatedSize,
-    availableCount: candidates.length
+    availableCount: candidates.length,
+    // 高画质模式：如果首选失败，提供其他 variant 供回退
+    fallbacks: qualityPreference === 'high'
+      ? candidates.slice(1).map(c => c.url)
+      : []
   };
 }
 
