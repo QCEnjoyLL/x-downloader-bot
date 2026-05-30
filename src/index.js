@@ -175,6 +175,17 @@ function extractTwitterUrls(text) {
   return text.match(twitterRegex) || [];
 }
 
+// 从 URL 中提取分辨率（如 .../1280x720/...）
+function extractResolutionFromUrl(url) {
+  const match = url.match(/(\d{2,4})x(\d{2,4})/);
+  if (match) {
+    const w = parseInt(match[1]);
+    const h = parseInt(match[2]);
+    if (w > 0 && h > 0) return [w, h];
+  }
+  return [0, 0];
+}
+
 // 匹配视频直链：video.twimg.com、.mp4、.mov 等
 function extractDirectVideoUrls(text) {
   const patterns = [
@@ -208,14 +219,18 @@ async function processDirectVideoUrls(urls, chatId, statusMsgId) {
       const urlPath = new URL(url).pathname;
       const filename = urlPath.split('/').pop() || `video_${Date.now()}.mp4`;
 
+      // 尝试从 URL 中提取分辨率（如 /1280x720/）
+      const [dw, dh] = extractResolutionFromUrl(url);
+      const dimInfo = dw ? ` ${dw}x${dh}` : '';
+
       const savedPath = await saveToDisk(filename, file.buffer);
 
       await updateStatusMessage(chatId, statusMsgId,
-        `📤 上传视频${label} (${formatFileSize(file.size)})...`);
+        `📤 上传视频${label}${dimInfo} (${formatFileSize(file.size)})...`);
 
       let videoSent = await uploadVideoFile(
         chatId, file.buffer, file.contentType,
-        `🎬 视频直链${label}`, null, 0, 0
+        `🎬 视频直链${label}${dimInfo}`, null, dw, dh
       );
 
       if (!videoSent) {
