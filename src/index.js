@@ -828,6 +828,12 @@ async function processTwitterUrlDownload(originalUrl, chatId, statusMessageId) {
 
       for (let i = 0; i < mediaData.videos.length; i++) {
         const video = mediaData.videos[i];
+
+        // 解析视频尺寸（如 "1280x2778"）
+        const [vidW, vidH] = video.quality
+          ? video.quality.split('x').map(Number)
+          : [0, 0];
+
         const videoCaption = `🎬 视频 ${i + 1}/${mediaData.videos.length}\n` +
           `📐 质量: ${video.quality || '未知'}\n` +
           `⏱️ 时长: ${video.duration || '未知'}` +
@@ -852,7 +858,7 @@ async function processTwitterUrlDownload(originalUrl, chatId, statusMessageId) {
             // 策略1: URL 直传
             await updateStatusMessage(chatId, statusMessageId,
               `📤 上传视频 ${i + 1}/${mediaData.videos.length}${tryInfo}...`);
-            videoSent = await sendVideoByUrl(chatId, tryUrl, videoCaption);
+            videoSent = await sendVideoByUrl(chatId, tryUrl, videoCaption, vidW, vidH);
             if (videoSent) break;
 
             // 策略2: 下载后上传
@@ -870,7 +876,7 @@ async function processTwitterUrlDownload(originalUrl, chatId, statusMessageId) {
                 `📤 上传视频 ${i + 1}/${mediaData.videos.length} ` +
                 `(${formatFileSize(file.size)})...`);
               videoSent = await uploadVideoFile(
-                chatId, file.buffer, file.contentType, videoCaption, video.thumbnailUrl
+                chatId, file.buffer, file.contentType, videoCaption, video.thumbnailUrl, vidW, vidH
               );
 
               if (videoSent) {
@@ -1110,7 +1116,7 @@ async function cleanupFile(filepath) {
 
 // ==================== 文件上传 (Telegram) ====================
 
-async function uploadVideoFile(chatId, buffer, contentType, caption, thumbnailUrl) {
+async function uploadVideoFile(chatId, buffer, contentType, caption, thumbnailUrl, width, height) {
   try {
     const botToken = getBotToken();
     if (!botToken) return false;
@@ -1120,9 +1126,11 @@ async function uploadVideoFile(chatId, buffer, contentType, caption, thumbnailUr
     formData.append('video', new Blob([buffer], { type: contentType }), 'video.mp4');
     if (caption) formData.append('caption', caption);
     if (thumbnailUrl) formData.append('thumb', thumbnailUrl);
+    if (width) formData.append('width', String(width));
+    if (height) formData.append('height', String(height));
     formData.append('supports_streaming', 'true');
 
-    console.log(`Uploading video: ${formatFileSize(buffer.byteLength)}`);
+    console.log(`Uploading video: ${formatFileSize(buffer.byteLength)} ${width ? `${width}x${height}` : ''}`);
 
     const response = await fetch(`${getTelegramApiUrl()}/bot${botToken}/sendVideo`, {
       method: 'POST',
@@ -1211,22 +1219,25 @@ async function uploadDocumentFile(chatId, buffer, filename, contentType, caption
   }
 }
 
-async function sendVideoByUrl(chatId, videoUrl, caption) {
+async function sendVideoByUrl(chatId, videoUrl, caption, width, height) {
   try {
     const botToken = getBotToken();
     if (!botToken) return false;
 
-    console.log(`Sending video by URL: ${videoUrl.substring(0, 80)}...`);
+    console.log(`Sending video by URL: ${videoUrl.substring(0, 80)}... ${width ? `${width}x${height}` : ''}`);
+
+    const body = {
+      chat_id: chatId,
+      video: videoUrl,
+      caption: caption,
+      supports_streaming: true
+    };
+    if (width) { body.width = width; body.height = height; }
 
     const response = await fetch(`${getTelegramApiUrl()}/bot${botToken}/sendVideo`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        chat_id: chatId,
-        video: videoUrl,
-        caption: caption,
-        supports_streaming: true
-      }),
+      body: JSON.stringify(body),
       signal: AbortSignal.timeout(30000)
     });
 
