@@ -38,7 +38,7 @@ docker compose up -d
 
 ### 2. 部署
 
-**Docker CLI**
+**Docker CLI（基础版，50MB 限制）**
 
 ```bash
 docker run -d \
@@ -50,11 +50,34 @@ docker run -d \
   orangeqiu/x-downloader-bot:latest
 ```
 
-**Docker Compose**
+**Docker CLI（本地 API 版，2GB 限制）**
+
+```bash
+# 1. 启本地 Bot API（突破 50MB）
+docker run -d --name telegram-api \
+  -e TELEGRAM_API_ID=你的API_ID \
+  -e TELEGRAM_API_HASH=你的API_HASH \
+  -v $(pwd)/telegram-api:/var/lib/telegram-bot-api \
+  --restart unless-stopped \
+  aiogram/telegram-bot-api:latest
+
+# 2. 启 bot
+docker run -d \
+  --name x-downloader-bot \
+  -e BOT_TOKEN=你的token \
+  -e POLLING=true \
+  -e TELEGRAM_API_URL=http://telegram-api:8081 \
+  --link telegram-api \
+  -v $(pwd)/data:/app/data \
+  --restart unless-stopped \
+  orangeqiu/x-downloader-bot:latest
+```
+
+**Docker Compose（推荐）**
 
 ```bash
 wget https://raw.githubusercontent.com/orangeqiu/x-downloader-bot/main/docker-compose.yml
-echo "BOT_TOKEN=你的token" > .env
+# .env 中填入 BOT_TOKEN、TELEGRAM_API_ID、TELEGRAM_API_HASH
 docker compose up -d
 ```
 
