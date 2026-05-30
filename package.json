@@ -1,35 +1,26 @@
 {
-  "name": "x-media-bot",
-  "version": "1.0.0",
+  "name": "x-downloader-bot",
+  "version": "1.2.0",
   "type": "module",
-  "description": "Telegram bot for extracting Twitter/X media (videos and images) using Cloudflare Workers",
-  "main": "src/index.js",
-  "keywords": ["telegram", "bot", "twitter", "x", "media", "video", "image", "cloudflare", "workers"],
+  "description": "Telegram bot for extracting Twitter/X media (videos and images) — Docker deployment",
+  "main": "src/server.js",
+  "keywords": ["telegram", "bot", "twitter", "x", "media", "video", "image", "docker"],
   "author": "Your Name",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/yourusername/x-media-bot.git"
+    "url": "git+https://github.com/yourusername/x-downloader-bot.git"
   },
   "bugs": {
-    "url": "https://github.com/yourusername/x-media-bot/issues"
+    "url": "https://github.com/yourusername/x-downloader-bot/issues"
   },
-  "homepage": "https://github.com/yourusername/x-media-bot#readme",
+  "homepage": "https://github.com/yourusername/x-downloader-bot#readme",
   "scripts": {
-    "dev": "wrangler dev",
-    "deploy": "wrangler deploy",
-    "debug": "wrangler deploy --config wrangler-debug.toml",
-    "debug-dev": "wrangler dev --config wrangler-debug.toml",
-    "logs": "wrangler tail",
-    "diagnose": "node diagnose.js",
-    "test-apis": "node test-apis.js",
-    "setup": "node setup.js",
-    "test": "node test-bot.js"
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js"
   },
   "dependencies": {
-    "node-telegram-bot-api": "^0.64.0"
-  },
-  "devDependencies": {
-    "wrangler": "^3.0.0"
+    "dotenv": "^16.4.0",
+    "express": "^4.21.0"
   }
 }

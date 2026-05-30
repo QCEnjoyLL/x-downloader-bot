@@ -1,61 +1,57 @@
-// X Media Bot for Telegram
+// X Downloader Bot for Telegram — Docker 部署版
 // 使用 fxtwitter 和 vxtwitter API 提取视频和图片
 
-export default {
-  async fetch(request, env) {
-    const url = new URL(request.url);
+import { getUserMode, setUserMode, getUserQuality, setUserQuality } from './store.js';
 
-    if (request.method === 'POST' && url.pathname === '/webhook') {
-      return handleTelegramWebhook(request, env);
-    }
+// ==================== 工具函数 ====================
 
-    // 设置 Webhook 的路径
-    if (url.pathname === '/setup-webhook') {
-      return setupWebhook(request, env);
-    }
+function getBotToken() {
+  return process.getBotToken() || '';
+}
 
-    // 主页显示状态和设置链接
-    const workerUrl = url.origin;
-    return new Response(`
-      <!DOCTYPE html>
-      <html lang="zh-CN">
-      <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>X 媒体机器人</title>
-        <style>
-          body { font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; }
-          code { background: #f4f4f4; padding: 2px 6px; border-radius: 3px; }
-          .btn { background: #0088cc; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; display: inline-block; }
-          .btn:hover { background: #006699; }
-        </style>
-      </head>
-      <body>
-        <h1>🤖 X 媒体机器人</h1>
-        <p>机器人运行中！</p>
-        <p>时间: ${new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })}</p>
-        <p>BOT_TOKEN 配置状态: ${env.BOT_TOKEN ? '已配置' : '未配置'}</p>
-        
-        <h2>🔧 设置</h2>
-        ${env.BOT_TOKEN ? `
-          <p>Webhook 地址: <code>${workerUrl}/webhook</code></p>
-          <p><a href="/setup-webhook" class="btn">🚀 设置 Webhook</a></p>
-        ` : `
-          <p>请先配置 BOT_TOKEN: <code>wrangler secret put BOT_TOKEN</code></p>
-        `}
-      </body>
-      </html>
-    `, {
-      headers: {
-        'Content-Type': 'text/html; charset=utf-8'
-      }
-    });
-  }
-};
+function formatFileSize(bytes) {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
 
-async function handleTelegramWebhook(request, env) {
+// ==================== 状态页 ====================
+
+export async function getStatusHtml() {
+  const token = getBotToken();
+  const time = new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' });
+  return `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>X 媒体机器人</title>
+  <style>
+    body { font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; }
+    code { background: #f4f4f4; padding: 2px 6px; border-radius: 3px; }
+    .btn { background: #0088cc; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; display: inline-block; }
+    .btn:hover { background: #006699; }
+  </style>
+</head>
+<body>
+  <h1>🤖 X 媒体机器人</h1>
+  <p>机器人运行中！</p>
+  <p>时间: ${time}</p>
+  <p>BOT_TOKEN 配置状态: ${token ? '已配置' : '未配置'}</p>
+  <h2>🔧 设置</h2>
+  ${token ? `
+    <p><a href="/setup-webhook" class="btn">🚀 设置 Webhook</a></p>
+  ` : `
+    <p>请在 .env 文件中配置 BOT_TOKEN</p>
+  `}
+</body>
+</html>`;
+}
+
+// ==================== Webhook 处理 ====================
+
+export async function handleTelegramWebhook(update) {
   try {
-    const update = await request.json();
     console.log('Received update:', JSON.stringify(update));
 
     if (update.message && update.message.text) {
@@ -66,8 +62,30 @@ async function handleTelegramWebhook(request, env) {
 
       // 处理 /start 命令
       if (messageText === '/start') {
-        await sendMessage(chatId, '🤖 X 媒体机器人已启动！\n\n发送包含 Twitter/X 链接的消息，我会帮你提取视频和图片。\n\n支持的链接格式：\n• https://twitter.com/username/status/123\n• https://x.com/username/status/123', env);
-        return new Response('OK', { status: 200 });
+        await sendMessage(chatId,
+          '🤖 X 媒体机器人已启动！\n\n' +
+          '发送包含 Twitter/X 链接的消息，我会帮你提取视频和图片。\n\n' +
+          '支持的命令：\n' +
+          '• /mode - 查看或切换模式（链接/下载）\n' +
+          '• /quality - 查看或设置视频画质\n\n' +
+          '支持的链接格式：\n' +
+          '• https://twitter.com/username/status/123\n' +
+          '• https://x.com/username/status/123\n\n' +
+          '💡 默认使用 📥下载+最高清 模式，直接发送 /mode 查看'
+        );
+        return;
+      }
+
+      // 处理 /mode 命令
+      if (messageText.startsWith('/mode')) {
+        await handleModeCommand(chatId, messageText);
+        return;
+      }
+
+      // 处理 /quality 命令
+      if (messageText.startsWith('/quality')) {
+        await handleQualityCommand(chatId, messageText);
+        return;
       }
 
       // 检查是否包含 Twitter/X 链接
@@ -75,21 +93,43 @@ async function handleTelegramWebhook(request, env) {
 
       if (twitterUrls.length > 0) {
         console.log('Found Twitter URLs:', twitterUrls);
-        await sendMessage(chatId, '🔍 检测到 Twitter/X 链接，正在处理...', env);
 
-        for (const twitterUrl of twitterUrls) {
-          await processTwitterUrl(twitterUrl, chatId, env);
+        // 获取用户模式偏好
+        const mode = await getUserMode(chatId);
+        console.log(`User mode: ${mode}`);
+
+        if (mode === 'download') {
+          // 下载模式：异步处理
+          const statusMsgId = await sendMessage(chatId, '🔍 检测到 Twitter/X 链接，正在分析...');
+
+          const urlsCopy = [...twitterUrls];
+          // Docker 环境不需要 ctx.waitUntil，直接异步处理
+          processUrlsDownload(urlsCopy, chatId, statusMsgId).catch(error => {
+            console.error('Error in download processing:', error);
+            sendMessage(chatId, `❌ 处理过程中出错: ${error.message}`).catch(() => {});
+          });
+        } else {
+          // 链接模式：同步处理（现有逻辑）
+          await sendMessage(chatId, '🔍 检测到 Twitter/X 链接，正在处理...');
+
+          for (const twitterUrl of twitterUrls) {
+            await processTwitterUrl(twitterUrl, chatId);
+          }
         }
       } else {
         // 如果没有找到 Twitter 链接，给出提示
-        await sendMessage(chatId, '❌ 未检测到 Twitter/X 链接。\n\n请发送包含以下格式的链接：\n• https://twitter.com/用户名/status/123\n• https://x.com/用户名/status/123', env);
+        await sendMessage(chatId,
+          '❌ 未检测到 Twitter/X 链接。\n\n' +
+          '请发送包含以下格式的链接：\n' +
+          '• https://twitter.com/用户名/status/123\n' +
+          '• https://x.com/用户名/status/123\n\n' +
+          '💡 使用 /mode 切换下载模式，可直接获取视频文件！'
+        );
       }
     }
 
-    return new Response('OK', { status: 200 });
   } catch (error) {
     console.error('Error handling webhook:', error);
-    return new Response('Error', { status: 500 });
   }
 }
 
@@ -98,14 +138,14 @@ function extractTwitterUrls(text) {
   return text.match(twitterRegex) || [];
 }
 
-async function processTwitterUrl(originalUrl, chatId, env) {
+async function processTwitterUrl(originalUrl, chatId) {
   try {
     console.log('Processing URL:', originalUrl);
 
     // 从原始 URL 提取用户名和状态 ID
     const urlMatch = originalUrl.match(/https?:\/\/(?:twitter\.com|x\.com)\/(\w+)\/status\/(\d+)/);
     if (!urlMatch) {
-      await sendMessage(chatId, '❌ 无法解析 Twitter/X 链接', env);
+      await sendMessage(chatId, '❌ 无法解析 Twitter/X 链接');
       return;
     }
 
@@ -114,7 +154,7 @@ async function processTwitterUrl(originalUrl, chatId, env) {
 
     // 优先使用 fxtwitter API（支持多种清晰度）
     console.log(`Fetching from fxtwitter: ${username}/${statusId}`);
-    await sendMessage(chatId, '🔄 正在从 fxtwitter 获取资源（支持多清晰度）...', env);
+    await sendMessage(chatId, '🔄 正在从 fxtwitter 获取资源（支持多清晰度）...');
 
     let mediaData = await fetchFromFxTwitter(username, statusId);
     console.log('FxTwitter result:', mediaData ? 'SUCCESS' : 'FAILED');
@@ -122,22 +162,22 @@ async function processTwitterUrl(originalUrl, chatId, env) {
     // 如果 fxtwitter 失败，尝试 vxtwitter（仅最高画质）
     if (!mediaData) {
       console.log(`Fetching from vxtwitter: ${username}/${statusId}`);
-      await sendMessage(chatId, '🔄 尝试备用 API（最高画质）...', env);
+      await sendMessage(chatId, '🔄 尝试备用 API（最高画质）...');
       mediaData = await fetchFromVxTwitter(username, statusId);
       console.log('VxTwitter result:', mediaData ? 'SUCCESS' : 'FAILED');
     }
 
     if (mediaData) {
       console.log('Sending media response:', mediaData);
-      await sendMediaResponse(chatId, mediaData, env);
+      await sendMediaResponse(chatId, mediaData);
     } else {
       console.log('No media data found from both APIs');
-      await sendMessage(chatId, '❌ 未找到媒体内容或获取失败\n\n可能原因：\n• 推文不包含视频或图片\n• 推文已被删除\n• API 暂时不可用', env);
+      await sendMessage(chatId, '❌ 未找到媒体内容或获取失败\n\n可能原因：\n• 推文不包含视频或图片\n• 推文已被删除\n• API 暂时不可用');
     }
 
   } catch (error) {
     console.error('Error processing Twitter URL:', error);
-    await sendMessage(chatId, `❌ 处理链接时出错: ${error.message}`, env);
+    await sendMessage(chatId, `❌ 处理链接时出错: ${error.message}`);
   }
 }
 
@@ -386,7 +426,7 @@ async function fetchFromVxTwitter(username, statusId) {
   }
 }
 
-async function sendMediaResponse(chatId, mediaData, env) {
+async function sendMediaResponse(chatId, mediaData) {
   try {
     const baseText = `📄 资源提取成功\n` +
       `👤 作者: ${mediaData.author}\n` +
@@ -395,18 +435,18 @@ async function sendMediaResponse(chatId, mediaData, env) {
 
     if (mediaData.type === 'text') {
       // 情况1: 既没有图片也没有视频，直接返回帖文
-      await sendMessage(chatId, baseText, env);
+      await sendMessage(chatId, baseText);
 
     } else if (mediaData.type === 'photos') {
       // 情况2: 只有图片，先返回帖文，再分别发送图片
-      await sendMessage(chatId, baseText, env);
+      await sendMessage(chatId, baseText);
 
       // 发送所有图片
       for (let i = 0; i < mediaData.photos.length; i++) {
         const photo = mediaData.photos[i];
         const caption = `📸 图片 ${i + 1}/${mediaData.photos.length}`;
 
-        await sendPhoto(chatId, photo.url, caption, env);
+        await sendPhoto(chatId, photo.url, caption);
 
         // 添加小延迟避免发送过快
         if (i < mediaData.photos.length - 1) {
@@ -423,14 +463,14 @@ async function sendMediaResponse(chatId, mediaData, env) {
         `� 内容:  ${mediaData.text.substring(0, 200)}${mediaData.text.length > 200 ? '...' : ''}`;
 
       // 先发送基本信息
-      await sendMessage(chatId, videoCaption, env);
+      await sendMessage(chatId, videoCaption);
 
       // 发送所有视频的封面图
       for (let i = 0; i < mediaData.videos.length; i++) {
         const video = mediaData.videos[i];
         if (video.thumbnailUrl) {
           const thumbnailCaption = `📸 视频封面 ${i + 1}/${mediaData.videos.length}\n📐 质量: ${video.quality}\n⏱️ 时长: ${video.duration}`;
-          await sendPhoto(chatId, video.thumbnailUrl, thumbnailCaption, env);
+          await sendPhoto(chatId, video.thumbnailUrl, thumbnailCaption);
 
           // 添加小延迟避免发送过快
           if (i < mediaData.videos.length - 1) {
@@ -455,7 +495,7 @@ async function sendMediaResponse(chatId, mediaData, env) {
           caption += `🔗 链接: ${video.url}`;
         }
 
-        await sendMessage(chatId, caption, env);
+        await sendMessage(chatId, caption);
 
         // 添加小延迟避免发送过快
         if (i < mediaData.videos.length - 1) {
@@ -473,14 +513,14 @@ async function sendMediaResponse(chatId, mediaData, env) {
         `💬 内容: ${mediaData.text.substring(0, 200)}${mediaData.text.length > 200 ? '...' : ''}`;
 
       // 先发送基本信息
-      await sendMessage(chatId, mixedCaption, env);
+      await sendMessage(chatId, mixedCaption);
 
       // 发送所有视频的封面图
       for (let i = 0; i < mediaData.videos.length; i++) {
         const video = mediaData.videos[i];
         if (video.thumbnailUrl) {
           const thumbnailCaption = `📸 视频封面 ${i + 1}/${mediaData.videos.length}\n📐 质量: ${video.quality}\n⏱️ 时长: ${video.duration}`;
-          await sendPhoto(chatId, video.thumbnailUrl, thumbnailCaption, env);
+          await sendPhoto(chatId, video.thumbnailUrl, thumbnailCaption);
 
           // 添加小延迟避免发送过快
           await new Promise(resolve => setTimeout(resolve, 300));
@@ -503,7 +543,7 @@ async function sendMediaResponse(chatId, mediaData, env) {
           caption += `🔗 链接: ${video.url}`;
         }
 
-        await sendMessage(chatId, caption, env);
+        await sendMessage(chatId, caption);
 
         // 添加小延迟避免发送过快
         await new Promise(resolve => setTimeout(resolve, 500));
@@ -514,7 +554,7 @@ async function sendMediaResponse(chatId, mediaData, env) {
         const photo = mediaData.photos[i];
         const caption = `📸 图片 ${i + 1}/${mediaData.photos.length}`;
 
-        await sendPhoto(chatId, photo.url, caption, env);
+        await sendPhoto(chatId, photo.url, caption);
 
         // 添加小延迟避免发送过快
         if (i < mediaData.photos.length - 1) {
@@ -525,13 +565,13 @@ async function sendMediaResponse(chatId, mediaData, env) {
 
   } catch (error) {
     console.error('Error sending media response:', error);
-    await sendMessage(chatId, '发送资源信息时出错', env);
+    await sendMessage(chatId, '发送资源信息时出错');
   }
 }
 
-async function sendPhoto(chatId, photoUrl, caption, env) {
+async function sendPhoto(chatId, photoUrl, caption) {
   try {
-    const botToken = env.BOT_TOKEN;
+    const botToken = getBotToken();
     if (!botToken) {
       console.error('BOT_TOKEN not configured');
       return false;
@@ -559,7 +599,7 @@ async function sendPhoto(chatId, photoUrl, caption, env) {
       console.error('Telegram sendPhoto API error:', response.status, errorText);
       // 如果发送图片失败，回退到发送文本
       console.log('Falling back to text message');
-      return await sendMessage(chatId, caption, env);
+      return await sendMessage(chatId, caption);
     }
 
     console.log('Photo sent successfully');
@@ -568,13 +608,13 @@ async function sendPhoto(chatId, photoUrl, caption, env) {
   } catch (error) {
     console.error('Error sending photo:', error);
     // 如果发送图片失败，回退到发送文本
-    return await sendMessage(chatId, caption, env);
+    return await sendMessage(chatId, caption);
   }
 }
 
-async function sendMessage(chatId, text, env) {
+async function sendMessage(chatId, text) {
   try {
-    const botToken = env.BOT_TOKEN;
+    const botToken = getBotToken();
     if (!botToken) {
       console.error('BOT_TOKEN not configured');
       return false;
@@ -596,111 +636,673 @@ async function sendMessage(chatId, text, env) {
       })
     });
 
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.error('Telegram API error:', response.status, errorText);
-      return false;
+    const result = await response.json();
+
+    if (!response.ok || !result.ok) {
+      console.error('Telegram API error:', response.status, JSON.stringify(result));
+      return null;
     }
 
     console.log('Message sent successfully');
-    return true;
-
+    return result.result.message_id || null;
   } catch (error) {
     console.error('Error sending message:', error);
+    return null;
+  }
+}
+
+// ==================== 命令处理 ====================
+
+async function handleModeCommand(chatId, messageText) {
+  const parts = messageText.trim().split(/\s+/);
+  const currentMode = await getUserMode(chatId);
+
+  if (parts.length === 1) {
+    const modeLabel = currentMode === 'download' ? '📥 下载模式' : '🔗 链接模式';
+    await sendMessage(chatId,
+      `${modeLabel}\n\n` +
+      '使用以下命令切换模式：\n' +
+      '• /mode download - 下载模式（下载并发送视频文件）\n' +
+      '• /mode link - 链接模式（发送视频链接）\n\n' +
+      '💡 下载模式下会尝试下载视频并作为文件发送'
+    );
+  } else if (parts[1] === 'download') {
+    await setUserMode(chatId, 'download');
+    await sendMessage(chatId,
+      '✅ 已切换到 📥 下载模式\n\n' +
+      '视频将直接下载并作为文件发送。\n' +
+      '• 使用 /quality 调整画质\n' +
+      '• 使用 /mode link 切回链接模式'
+    );
+  } else if (parts[1] === 'link') {
+    await setUserMode(chatId, 'link');
+    await sendMessage(chatId, '✅ 已切换到 🔗 链接模式\n\n视频将以链接形式发送。');
+  } else {
+    await sendMessage(chatId, '❌ 未知模式。请使用 /mode download 或 /mode link');
+  }
+}
+
+async function handleQualityCommand(chatId, messageText) {
+  const parts = messageText.trim().split(/\s+/);
+  const currentQuality = await getUserQuality(chatId);
+  const qualityLabels = { high: '🔴 高画质', medium: '🟡 中画质', low: '🟢 低画质' };
+
+  if (parts.length === 1) {
+    await sendMessage(chatId,
+      `当前画质: ${qualityLabels[currentQuality]}\n\n` +
+      '使用以下命令调整画质：\n' +
+      '• /quality high - 最高码率（文件较大）\n' +
+      '• /quality medium - 均衡画质和大小\n' +
+      '• /quality low - 最小文件（适合快速下载）\n\n' +
+      '💡 仅在下载模式 (/mode download) 下生效'
+    );
+  } else if (['high', 'medium', 'low'].includes(parts[1])) {
+    await setUserQuality(chatId, parts[1]);
+    await sendMessage(chatId, `✅ 已切换到 ${qualityLabels[parts[1]]}`);
+  } else {
+    await sendMessage(chatId,
+      '❌ 未知画质。请使用 /quality high、/quality medium 或 /quality low'
+    );
+  }
+}
+
+// ==================== 下载模式核心 ====================
+
+async function processUrlsDownload(twitterUrls, chatId, statusMessageId) {
+  let currentStatusId = statusMessageId;
+
+  for (let i = 0; i < twitterUrls.length; i++) {
+    const twitterUrl = twitterUrls[i];
+
+    if (twitterUrls.length > 1) {
+      currentStatusId = await updateStatusMessage(
+        chatId, currentStatusId,
+        `🔍 处理第 ${i + 1}/${twitterUrls.length} 个链接...`
+      );
+    }
+
+    await processTwitterUrlDownload(twitterUrl, chatId, currentStatusId);
+  }
+}
+
+async function processTwitterUrlDownload(originalUrl, chatId, statusMessageId) {
+  try {
+    console.log('Processing URL (download mode):', originalUrl);
+
+    const urlMatch = originalUrl.match(/https?:\/\/(?:twitter\.com|x\.com)\/(\w+)\/status\/(\d+)/);
+    if (!urlMatch) {
+      await sendMessage(chatId, '❌ 无法解析 Twitter/X 链接');
+      return;
+    }
+
+    const [, username, statusId] = urlMatch;
+    console.log(`Extracted: username=${username}, statusId=${statusId}`);
+
+    // 获取媒体数据
+    await updateStatusMessage(chatId, statusMessageId, '🔄 正在获取推文信息...');
+
+    let mediaData = await fetchFromFxTwitter(username, statusId);
+    console.log('FxTwitter result:', mediaData ? 'SUCCESS' : 'FAILED');
+
+    if (!mediaData) {
+      mediaData = await fetchFromVxTwitter(username, statusId);
+      console.log('VxTwitter result:', mediaData ? 'SUCCESS' : 'FAILED');
+    }
+
+    if (!mediaData) {
+      await sendMessage(chatId, '❌ 未找到媒体内容或获取失败\n\n可能原因：\n• 推文不包含视频或图片\n• 推文已被删除\n• API 暂时不可用');
+      return;
+    }
+
+    // 获取画质偏好
+    const qualityPreference = await getUserQuality(chatId);
+    const MAX_VIDEO_SIZE = 50 * 1024 * 1024;
+
+    // 构建基础信息文本
+    const baseText = `📄 资源提取成功\n` +
+      `👤 作者: ${mediaData.author}\n` +
+      `🔗 来源: ${mediaData.source}\n\n` +
+      `💬 内容: ${mediaData.text ? mediaData.text.substring(0, 200) : '(无文本)'}` +
+      `${mediaData.text && mediaData.text.length > 200 ? '...' : ''}`;
+
+    if (mediaData.type === 'text') {
+      await sendMessage(chatId, baseText);
+      return;
+    }
+
+    // 处理图片
+    if (mediaData.photos && mediaData.photos.length > 0) {
+      await updateStatusMessage(chatId, statusMessageId,
+        `🖼️ 正在发送 ${mediaData.photos.length} 张图片...`);
+
+      for (let i = 0; i < mediaData.photos.length; i++) {
+        const photo = mediaData.photos[i];
+        const caption = mediaData.photos.length === 1
+          ? `📸 ${baseText}`
+          : `📸 图片 ${i + 1}/${mediaData.photos.length}`;
+
+        await sendChatAction(chatId, 'upload_photo');
+
+        // 图片优先 URL 直传
+        const sent = await sendPhoto(chatId, photo.url, caption);
+        if (!sent) {
+          // URL 直传失败，下载后上传
+          await updateStatusMessage(chatId, statusMessageId,
+            `📥 下载图片 ${i + 1}/${mediaData.photos.length}...`);
+          try {
+            const file = await downloadFile(photo.url, 10 * 1024 * 1024);
+            await uploadPhotoFile(chatId, file.buffer, file.contentType, caption);
+          } catch (downloadErr) {
+            console.error('Photo download failed:', downloadErr);
+            await sendMessage(chatId, caption);
+          }
+        }
+      }
+    }
+
+    // 处理视频
+    if (mediaData.videos && mediaData.videos.length > 0) {
+      await updateStatusMessage(chatId, statusMessageId,
+        `🎬 正在处理 ${mediaData.videos.length} 个视频...`);
+
+      for (let i = 0; i < mediaData.videos.length; i++) {
+        const video = mediaData.videos[i];
+        const videoCaption = `🎬 视频 ${i + 1}/${mediaData.videos.length}\n` +
+          `📐 质量: ${video.quality || '未知'}\n` +
+          `⏱️ 时长: ${video.duration || '未知'}` +
+          `${mediaData.videos.length === 1 ? '\n\n' + baseText : ''}`;
+
+        await sendChatAction(chatId, 'upload_video');
+
+        // 选择最佳 video variant（含预估算过滤）
+        const selected = selectVideoVariant(video, qualityPreference, MAX_VIDEO_SIZE);
+
+        if (selected.url && !selected.reason) {
+          const estimatedInfo = selected.estimatedSize
+            ? ` (约 ${formatFileSize(selected.estimatedSize)})`
+            : '';
+
+          // 策略1: URL 直传（Telegram 自行下载）
+          await updateStatusMessage(chatId, statusMessageId,
+            `📤 上传视频 ${i + 1}/${mediaData.videos.length}${estimatedInfo}...`);
+          let videoSent = await sendVideoByUrl(chatId, selected.url, videoCaption);
+
+          if (!videoSent) {
+            // 策略2: Worker 下载后上传
+            await updateStatusMessage(chatId, statusMessageId,
+              `📥 下载视频 ${i + 1}/${mediaData.videos.length}${estimatedInfo}...`);
+            try {
+              const file = await downloadFile(selected.url, MAX_VIDEO_SIZE);
+              await updateStatusMessage(chatId, statusMessageId,
+                `📤 上传视频 ${i + 1}/${mediaData.videos.length} ` +
+                `(${formatFileSize(file.size)})...`);
+              videoSent = await uploadVideoFile(
+                chatId, file.buffer, file.contentType, videoCaption, video.thumbnailUrl
+              );
+            } catch (downloadErr) {
+              console.error('Video download failed:', downloadErr);
+            }
+
+            if (!videoSent) {
+              // 策略3: 作为文档上传（兜底）
+              try {
+                const file = await downloadFile(selected.url, MAX_VIDEO_SIZE);
+                await uploadDocumentFile(
+                  chatId, file.buffer, 'video.mp4', file.contentType, videoCaption
+                );
+              } catch (docErr) {
+                console.error('Document upload also failed:', docErr);
+                // 最终兜底：发送链接
+                await sendVideoLinks(chatId, video, i, mediaData.videos.length);
+              }
+            }
+          }
+        } else if (selected.reason === 'all_too_large') {
+          // 所有 variant 预估都超过 50MB
+          await sendMessage(chatId,
+            `⚠️ 视频文件过大（预估最小 ${formatFileSize(selected.minEstimatedSize)}，Telegram 限制 50MB）\n\n` +
+            '正在发送链接，你可以在浏览器中下载...');
+          await sendVideoLinks(chatId, video, i, mediaData.videos.length);
+        } else {
+          // 没有可用 variant
+          await sendMessage(chatId,
+            '⚠️ 无法获取可用的视频下载链接\n\n正在发送链接...');
+          await sendVideoLinks(chatId, video, i, mediaData.videos.length);
+        }
+
+        // 多视频时发送缩略图预览
+        if (video.thumbnailUrl && mediaData.videos.length > 1) {
+          await sendPhoto(chatId, video.thumbnailUrl,
+            `📸 视频 ${i + 1}/${mediaData.videos.length} 封面`);
+        }
+      }
+    }
+
+    await updateStatusMessage(chatId, statusMessageId, '✅ 处理完成！');
+
+  } catch (error) {
+    console.error('Error in download mode:', error);
+    await sendMessage(chatId, `❌ 下载模式处理出错: ${error.message}`);
+  }
+}
+
+// ==================== 视频 Variant 选择 ====================
+
+function selectVideoVariant(video, qualityPreference, maxSizeBytes) {
+  let candidates = [];
+
+  if (video.variants && video.variants.length > 0) {
+    // fxtwitter 已按 bitrate 降序排列 variants
+    const durationSeconds = parseFloat(video.duration) || 0;
+
+    candidates = video.variants
+      .filter(v => v.bitrate && v.bitrate > 0)
+      .map(v => {
+        // 预估文件大小: bitrate(bps) × duration(s) ÷ 8 = bytes
+        // 加 15% 的容器/元数据开销
+        const estimatedSize = durationSeconds > 0
+          ? Math.ceil((v.bitrate * durationSeconds) / 8 * 1.15)
+          : null;
+
+        return {
+          url: v.url,
+          bitrate: v.bitrate || 0,
+          estimatedSize
+        };
+      });
+
+    // 预过滤：移除预估超限的 variant
+    const fittingCandidates = candidates.filter(c => {
+      if (c.estimatedSize === null) return true; // 无法估算的保留
+      return c.estimatedSize <= maxSizeBytes;
+    });
+
+    // 如果所有 variant 都预估算超限，直接放弃
+    if (candidates.length > 0 && fittingCandidates.length === 0) {
+      const minEstimated = Math.min(...candidates.map(c => c.estimatedSize || Infinity));
+      console.log(`All variants estimated too large. Min estimated: ${formatFileSize(minEstimated)}, max allowed: ${formatFileSize(maxSizeBytes)}`);
+      return { url: null, reason: 'all_too_large', minEstimatedSize: minEstimated };
+    }
+
+    candidates = fittingCandidates.length > 0 ? fittingCandidates : candidates;
+
+  } else if (video.url) {
+    // vxtwitter 单一 URL，无法预估大小
+    return { url: video.url, reason: null };
+  } else {
+    return { url: null, reason: 'no_variants' };
+  }
+
+  if (candidates.length === 0) {
+    return { url: null, reason: 'no_variants' };
+  }
+
+  // 根据画质偏好选择索引
+  let selectedIndex;
+  switch (qualityPreference) {
+    case 'high':
+      selectedIndex = 0;
+      break;
+    case 'medium':
+      selectedIndex = Math.floor(candidates.length / 2);
+      break;
+    case 'low':
+      selectedIndex = candidates.length - 1;
+      break;
+    default:
+      selectedIndex = 0;
+  }
+
+  const selected = candidates[selectedIndex] || candidates[0];
+  return {
+    url: selected.url,
+    reason: null,
+    estimatedSize: selected.estimatedSize,
+    availableCount: candidates.length
+  };
+}
+
+// ==================== 文件下载 ====================
+
+async function downloadFile(url, maxSizeBytes) {
+  console.log(`Downloading: ${url.substring(0, 80)}... (max: ${formatFileSize(maxSizeBytes)})`);
+
+  // HEAD 预检查大小
+  try {
+    const headResponse = await fetch(url, {
+      method: 'HEAD',
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+      },
+      signal: AbortSignal.timeout(15000)
+    });
+
+    if (headResponse.ok) {
+      const contentLength = headResponse.headers.get('Content-Length');
+      if (contentLength && parseInt(contentLength) > maxSizeBytes) {
+        throw new Error(`SIZE_EXCEEDED: ${formatFileSize(parseInt(contentLength))} > ${formatFileSize(maxSizeBytes)}`);
+      }
+    }
+  } catch (error) {
+    if (error.message.startsWith('SIZE_EXCEEDED')) throw error;
+    console.log('HEAD request failed, proceeding with GET:', error.message);
+  }
+
+  // GET 下载
+  const response = await fetch(url, {
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+    },
+    signal: AbortSignal.timeout(60000)
+  });
+
+  if (!response.ok) {
+    throw new Error(`DOWNLOAD_FAILED: HTTP ${response.status}`);
+  }
+
+  const contentType = response.headers.get('Content-Type') || 'application/octet-stream';
+
+  // 检查 Content-Length
+  const contentLength = response.headers.get('Content-Length');
+  if (contentLength && parseInt(contentLength) > maxSizeBytes) {
+    throw new Error(`SIZE_EXCEEDED: ${formatFileSize(parseInt(contentLength))} > ${formatFileSize(maxSizeBytes)}`);
+  }
+
+  // 流式读取，超过限制时中止
+  const reader = response.body.getReader();
+  const chunks = [];
+  let totalSize = 0;
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+
+    totalSize += value.length;
+    if (totalSize > maxSizeBytes) {
+      reader.cancel();
+      throw new Error(`SIZE_EXCEEDED: File exceeds ${formatFileSize(maxSizeBytes)}`);
+    }
+    chunks.push(value);
+  }
+
+  // 合并 chunks
+  const buffer = new Uint8Array(totalSize);
+  let offset = 0;
+  for (const chunk of chunks) {
+    buffer.set(chunk, offset);
+    offset += chunk.length;
+  }
+
+  console.log(`Downloaded: ${formatFileSize(totalSize)} (${contentType})`);
+  return { buffer: buffer.buffer, contentType, size: totalSize };
+}
+
+// ==================== 文件上传 (Telegram) ====================
+
+async function uploadVideoFile(chatId, buffer, contentType, caption, thumbnailUrl) {
+  try {
+    const botToken = getBotToken();
+    if (!botToken) return false;
+
+    const formData = new FormData();
+    formData.append('chat_id', chatId.toString());
+    formData.append('video', new Blob([buffer], { type: contentType }), 'video.mp4');
+    if (caption) formData.append('caption', caption);
+    if (thumbnailUrl) formData.append('thumb', thumbnailUrl);
+    formData.append('supports_streaming', 'true');
+
+    console.log(`Uploading video: ${formatFileSize(buffer.byteLength)}`);
+
+    const response = await fetch(`https://api.telegram.org/bot${botToken}/sendVideo`, {
+      method: 'POST',
+      body: formData,
+      signal: AbortSignal.timeout(120000)
+    });
+
+    const result = await response.json();
+
+    if (!result.ok) {
+      console.error('sendVideo (multipart) failed:', result.description);
+      return false;
+    }
+
+    console.log('Video uploaded successfully');
+    return true;
+  } catch (error) {
+    console.error('Error uploading video:', error);
     return false;
   }
 }
 
-async function setupWebhook(request, env) {
+async function uploadPhotoFile(chatId, buffer, contentType, caption) {
   try {
-    if (!env.BOT_TOKEN) {
-      return new Response(`
-        <!DOCTYPE html>
-        <html lang="zh-CN">
-        <head>
-          <meta charset="UTF-8">
-          <title>配置错误</title>
-        </head>
-        <body>
-          <h1>❌ 机器人令牌未配置</h1>
-          <p>请运行命令: <code>wrangler secret put BOT_TOKEN</code></p>
-          <a href="/">返回首页</a>
-        </body>
-        </html>
-      `, {
-        headers: { 'Content-Type': 'text/html; charset=utf-8' }
-      });
+    const botToken = getBotToken();
+    if (!botToken) return false;
+
+    const formData = new FormData();
+    formData.append('chat_id', chatId.toString());
+    formData.append('photo', new Blob([buffer], { type: contentType }), 'photo.jpg');
+    if (caption) formData.append('caption', caption);
+
+    console.log(`Uploading photo: ${formatFileSize(buffer.byteLength)}`);
+
+    const response = await fetch(`https://api.telegram.org/bot${botToken}/sendPhoto`, {
+      method: 'POST',
+      body: formData,
+      signal: AbortSignal.timeout(60000)
+    });
+
+    const result = await response.json();
+
+    if (!result.ok) {
+      console.error('sendPhoto (multipart) failed:', result.description);
+      return false;
     }
 
-    const url = new URL(request.url);
-    const webhookUrl = `${url.origin}/webhook`;
+    console.log('Photo uploaded successfully');
+    return true;
+  } catch (error) {
+    console.error('Error uploading photo:', error);
+    return false;
+  }
+}
 
-    const telegramUrl = `https://api.telegram.org/bot${env.BOT_TOKEN}/setWebhook`;
+async function uploadDocumentFile(chatId, buffer, filename, contentType, caption) {
+  try {
+    const botToken = getBotToken();
+    if (!botToken) return false;
+
+    const formData = new FormData();
+    formData.append('chat_id', chatId.toString());
+    formData.append('document', new Blob([buffer], { type: contentType }), filename);
+    if (caption) formData.append('caption', caption);
+
+    console.log(`Uploading document: ${formatFileSize(buffer.byteLength)}`);
+
+    const response = await fetch(`https://api.telegram.org/bot${botToken}/sendDocument`, {
+      method: 'POST',
+      body: formData,
+      signal: AbortSignal.timeout(120000)
+    });
+
+    const result = await response.json();
+
+    if (!result.ok) {
+      console.error('sendDocument failed:', result.description);
+      return false;
+    }
+
+    console.log('Document uploaded successfully');
+    return true;
+  } catch (error) {
+    console.error('Error uploading document:', error);
+    return false;
+  }
+}
+
+async function sendVideoByUrl(chatId, videoUrl, caption) {
+  try {
+    const botToken = getBotToken();
+    if (!botToken) return false;
+
+    console.log(`Sending video by URL: ${videoUrl.substring(0, 80)}...`);
+
+    const response = await fetch(`https://api.telegram.org/bot${botToken}/sendVideo`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        chat_id: chatId,
+        video: videoUrl,
+        caption: caption,
+        supports_streaming: true
+      }),
+      signal: AbortSignal.timeout(30000)
+    });
+
+    const result = await response.json();
+
+    if (!result.ok) {
+      console.error('sendVideo (URL) failed:', result.description);
+      return false;
+    }
+
+    console.log('Video sent by URL successfully');
+    return true;
+  } catch (error) {
+    console.error('Error sending video by URL:', error);
+    return false;
+  }
+}
+
+async function sendVideoLinks(chatId, video, index, total) {
+  let caption = `🔗 视频 ${index + 1}/${total}\n` +
+    `📐 质量: ${video.quality || 'N/A'}\n` +
+    `⏱️ 时长: ${video.duration || '未知'}\n`;
+
+  if (video.variants && video.variants.length > 0) {
+    caption += '\n📱 多清晰度链接：\n';
+    video.variants.forEach((variant, i) => {
+      const bitrate = variant.bitrate
+        ? `${Math.round(variant.bitrate / 1000)}k`
+        : '未知';
+      caption += `${i + 1}. ${bitrate} - ${variant.url}\n`;
+    });
+  } else if (video.url) {
+    caption += `\n🔗 链接: ${video.url}`;
+  }
+
+  await sendMessage(chatId, caption);
+}
+
+// ==================== 状态反馈 ====================
+
+async function updateStatusMessage(chatId, messageId, text) {
+  try {
+    const botToken = getBotToken();
+    if (!botToken) return messageId;
+
+    if (messageId) {
+      // 编辑已有消息
+      const response = await fetch(
+        `https://api.telegram.org/bot${botToken}/editMessageText`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            chat_id: chatId,
+            message_id: messageId,
+            text: text
+          })
+        }
+      );
+      const result = await response.json();
+      if (!result.ok) {
+        console.log('Edit message failed (may be unchanged):', result.description);
+      }
+      return messageId;
+    } else {
+      // 发送新消息
+      return await sendMessage(chatId, text);
+    }
+  } catch (error) {
+    console.error('Status message error:', error);
+    return messageId;
+  }
+}
+
+async function sendChatAction(chatId, action) {
+  try {
+    const botToken = getBotToken();
+    if (!botToken) return;
+
+    await fetch(`https://api.telegram.org/bot${botToken}/sendChatAction`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chat_id: chatId, action: action })
+    });
+  } catch (error) {
+    console.error('Chat action error:', error);
+  }
+}
+
+export async function setupWebhook(req) {
+  try {
+    if (!getBotToken()) {
+      return `<!DOCTYPE html>
+<html lang="zh-CN">
+<head><meta charset="UTF-8"><title>配置错误</title></head>
+<body>
+  <h1>❌ 机器人令牌未配置</h1>
+  <p>请在 <code>.env</code> 文件中配置 BOT_TOKEN</p>
+  <a href="/">返回首页</a>
+</body>
+</html>`;
+    }
+
+    const origin = `${req.protocol}://${req.get('host')}`;
+    const webhookUrl = `${origin}/webhook`;
+
+    const telegramUrl = `https://api.telegram.org/bot${getBotToken()}/setWebhook`;
     const response = await fetch(telegramUrl, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        url: webhookUrl
-      })
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url: webhookUrl })
     });
 
     const result = await response.json();
 
     if (result.ok) {
-      return new Response(`
-        <!DOCTYPE html>
-        <html lang="zh-CN">
-        <head>
-          <meta charset="UTF-8">
-          <title>设置成功</title>
-        </head>
-        <body>
-          <h1>✅ Webhook 设置成功！</h1>
-          <p>Webhook 地址: <code>${webhookUrl}</code></p>
-          <p>现在可以在 Telegram 中测试机器人了</p>
-          <a href="/">返回首页</a>
-        </body>
-        </html>
-      `, {
-        headers: { 'Content-Type': 'text/html; charset=utf-8' }
-      });
+      return `<!DOCTYPE html>
+<html lang="zh-CN">
+<head><meta charset="UTF-8"><title>设置成功</title></head>
+<body>
+  <h1>✅ Webhook 设置成功！</h1>
+  <p>Webhook 地址: <code>${webhookUrl}</code></p>
+  <p>现在可以在 Telegram 中测试机器人了</p>
+  <a href="/">返回首页</a>
+</body>
+</html>`;
     } else {
-      return new Response(`
-        <!DOCTYPE html>
-        <html lang="zh-CN">
-        <head>
-          <meta charset="UTF-8">
-          <title>设置失败</title>
-        </head>
-        <body>
-          <h1>❌ Webhook 设置失败</h1>
-          <p>错误信息: ${result.description}</p>
-          <a href="/">返回首页</a>
-        </body>
-        </html>
-      `, {
-        headers: { 'Content-Type': 'text/html; charset=utf-8' }
-      });
+      return `<!DOCTYPE html>
+<html lang="zh-CN">
+<head><meta charset="UTF-8"><title>设置失败</title></head>
+<body>
+  <h1>❌ Webhook 设置失败</h1>
+  <p>错误信息: ${result.description}</p>
+  <a href="/">返回首页</a>
+</body>
+</html>`;
     }
 
   } catch (error) {
-    return new Response(`
-      <!DOCTYPE html>
-      <html lang="zh-CN">
-      <head>
-        <meta charset="UTF-8">
-        <title>设置错误</title>
-      </head>
-      <body>
-        <h1>❌ 设置过程中出错</h1>
-        <p>错误信息: ${error.message}</p>
-        <a href="/">返回首页</a>
-      </body>
-      </html>
-    `, {
-      headers: { 'Content-Type': 'text/html; charset=utf-8' }
-    });
+    return `<!DOCTYPE html>
+<html lang="zh-CN">
+<head><meta charset="UTF-8"><title>设置错误</title></head>
+<body>
+  <h1>❌ 设置过程中出错</h1>
+  <p>错误信息: ${error.message}</p>
+  <a href="/">返回首页</a>
+</body>
+</html>`;
   }
 }

@@ -1,0 +1,11 @@
+services:
+  x-downloader-bot:
+    build: .
+    ports:
+      - "3000:3000"
+    environment:
+      - BOT_TOKEN=${BOT_TOKEN}
+      - PORT=3000
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
