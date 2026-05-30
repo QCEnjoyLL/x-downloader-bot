@@ -9,6 +9,15 @@ function getBotToken() {
   return process.env.BOT_TOKEN || '';
 }
 
+function getTelegramApiUrl() {
+  return process.env.TELEGRAM_API_URL || 'https://api.telegram.org';
+}
+
+function getMaxVideoSize() {
+  // 本地 Bot API 支持 2GB，云端仅 50MB
+  return process.env.TELEGRAM_API_URL ? 2 * 1024 * 1024 * 1024 : 50 * 1024 * 1024;
+}
+
 function formatFileSize(bytes) {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
@@ -577,7 +586,7 @@ async function sendPhoto(chatId, photoUrl, caption) {
       return false;
     }
 
-    const telegramApiUrl = `https://api.telegram.org/bot${botToken}/sendPhoto`;
+    const telegramApiUrl = `${getTelegramApiUrl()}/bot${botToken}/sendPhoto`;
 
     console.log(`Sending photo to ${chatId}: ${photoUrl}`);
 
@@ -620,7 +629,7 @@ async function sendMessage(chatId, text) {
       return false;
     }
 
-    const telegramApiUrl = `https://api.telegram.org/bot${botToken}/sendMessage`;
+    const telegramApiUrl = `${getTelegramApiUrl()}/bot${botToken}/sendMessage`;
 
     console.log(`Sending message to ${chatId}: ${text.substring(0, 100)}...`);
 
@@ -756,7 +765,8 @@ async function processTwitterUrlDownload(originalUrl, chatId, statusMessageId) {
 
     // 获取画质偏好
     const qualityPreference = await getUserQuality(chatId);
-    const MAX_VIDEO_SIZE = 50 * 1024 * 1024;
+    const MAX_VIDEO_SIZE = getMaxVideoSize();
+    const SIZE_LABEL = MAX_VIDEO_SIZE > 100 * 1024 * 1024 ? '2GB' : '50MB';
 
     // 构建基础信息文本
     const baseText = `📄 资源提取成功\n` +
@@ -858,9 +868,9 @@ async function processTwitterUrlDownload(originalUrl, chatId, statusMessageId) {
             }
           }
         } else if (selected.reason === 'all_too_large') {
-          // 所有 variant 预估都超过 50MB
+          // 所有 variant 预估都超过限制
           await sendMessage(chatId,
-            `⚠️ 视频文件过大（预估最小 ${formatFileSize(selected.minEstimatedSize)}，Telegram 限制 50MB）\n\n` +
+            `⚠️ 视频文件过大（预估最小 ${formatFileSize(selected.minEstimatedSize)}，限制 ${SIZE_LABEL}）\n\n` +
             '正在发送链接，你可以在浏览器中下载...');
           await sendVideoLinks(chatId, video, i, mediaData.videos.length);
         } else {
@@ -1053,7 +1063,7 @@ async function uploadVideoFile(chatId, buffer, contentType, caption, thumbnailUr
 
     console.log(`Uploading video: ${formatFileSize(buffer.byteLength)}`);
 
-    const response = await fetch(`https://api.telegram.org/bot${botToken}/sendVideo`, {
+    const response = await fetch(`${getTelegramApiUrl()}/bot${botToken}/sendVideo`, {
       method: 'POST',
       body: formData,
       signal: AbortSignal.timeout(120000)
@@ -1086,7 +1096,7 @@ async function uploadPhotoFile(chatId, buffer, contentType, caption) {
 
     console.log(`Uploading photo: ${formatFileSize(buffer.byteLength)}`);
 
-    const response = await fetch(`https://api.telegram.org/bot${botToken}/sendPhoto`, {
+    const response = await fetch(`${getTelegramApiUrl()}/bot${botToken}/sendPhoto`, {
       method: 'POST',
       body: formData,
       signal: AbortSignal.timeout(60000)
@@ -1119,7 +1129,7 @@ async function uploadDocumentFile(chatId, buffer, filename, contentType, caption
 
     console.log(`Uploading document: ${formatFileSize(buffer.byteLength)}`);
 
-    const response = await fetch(`https://api.telegram.org/bot${botToken}/sendDocument`, {
+    const response = await fetch(`${getTelegramApiUrl()}/bot${botToken}/sendDocument`, {
       method: 'POST',
       body: formData,
       signal: AbortSignal.timeout(120000)
@@ -1147,7 +1157,7 @@ async function sendVideoByUrl(chatId, videoUrl, caption) {
 
     console.log(`Sending video by URL: ${videoUrl.substring(0, 80)}...`);
 
-    const response = await fetch(`https://api.telegram.org/bot${botToken}/sendVideo`, {
+    const response = await fetch(`${getTelegramApiUrl()}/bot${botToken}/sendVideo`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -1204,7 +1214,7 @@ async function updateStatusMessage(chatId, messageId, text) {
     if (messageId) {
       // 编辑已有消息
       const response = await fetch(
-        `https://api.telegram.org/bot${botToken}/editMessageText`,
+        `${getTelegramApiUrl()}/bot${botToken}/editMessageText`,
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -1235,7 +1245,7 @@ async function sendChatAction(chatId, action) {
     const botToken = getBotToken();
     if (!botToken) return;
 
-    await fetch(`https://api.telegram.org/bot${botToken}/sendChatAction`, {
+    await fetch(`${getTelegramApiUrl()}/bot${botToken}/sendChatAction`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ chat_id: chatId, action: action })
@@ -1262,7 +1272,7 @@ export async function setupWebhook(req) {
     const origin = `${req.protocol}://${req.get('host')}`;
     const webhookUrl = `${origin}/webhook`;
 
-    const telegramUrl = `https://api.telegram.org/bot${getBotToken()}/setWebhook`;
+    const telegramUrl = `${getTelegramApiUrl()}/bot${getBotToken()}/setWebhook`;
     const response = await fetch(telegramUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },

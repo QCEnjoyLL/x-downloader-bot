@@ -10,6 +10,7 @@ import {
 const PORT = process.env.PORT || 3000;
 const POLLING = process.env.POLLING === 'true';
 const BOT_TOKEN = process.env.BOT_TOKEN || '';
+const TELEGRAM_API = process.env.TELEGRAM_API_URL || 'https://api.telegram.org';
 
 const app = express();
 app.use(express.json());
@@ -76,7 +77,7 @@ async function startPolling() {
 
   async function poll() {
     try {
-      const url = `https://api.telegram.org/bot${BOT_TOKEN}/getUpdates?timeout=30&offset=${offset}`;
+      const url = `${TELEGRAM_API}/bot${BOT_TOKEN}/getUpdates?timeout=30&offset=${offset}`;
       const response = await fetch(url);
       const data = await response.json();
 
@@ -98,7 +99,7 @@ async function startPolling() {
 
   // 删除已有的 webhook，切换到 getUpdates 模式
   try {
-    await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/deleteWebhook?drop_pending_updates=true`);
+    await fetch(`${TELEGRAM_API}/bot${BOT_TOKEN}/deleteWebhook?drop_pending_updates=true`);
     console.log('✅ Webhook 已清除，开始轮询');
   } catch {}
 

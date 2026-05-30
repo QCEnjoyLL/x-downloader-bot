@@ -10,8 +10,25 @@
 - 📥 默认下载模式，直接发送视频文件到 Telegram
 - 🎯 默认最高清，自动选择最高码率
 - 🔄 双重 API（fxtwitter + vxtwitter），自动回退
-- 📏 智能大小预估，超过 50MB 自动发送链接
+- 📏 智能大小预估，超过限制自动发送链接
+- 🚀 可选本地 Bot API，上传上限提升至 **2GB**
 - 🐳 Docker 部署，支持 amd64 / arm64
+
+## 上传限制
+
+| 模式 | 最大文件 | 
+|------|----------|
+| 云端 API（默认） | 50 MB |
+| 本地 Bot API | **2 GB** |
+
+启用本地 API 即可直传几乎所有 Twitter 视频：
+
+```bash
+# .env 中添加（先去 https://my.telegram.org/apps 获取）
+TELEGRAM_API_ID=你的ID
+TELEGRAM_API_HASH=你的HASH
+docker compose up -d
+```
 
 ## 快速开始
 
