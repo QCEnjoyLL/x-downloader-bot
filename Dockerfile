@@ -10,7 +10,7 @@ RUN npm ci --omit=dev --production
 COPY src/ ./src/
 
 # 确保数据目录存在
-RUN mkdir -p /app/data
+RUN mkdir -p /app/data /app/downloads
 
 EXPOSE 3000
 

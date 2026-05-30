@@ -1,6 +1,7 @@
 services:
-  telegram-api:
+  api:
     image: aiogram/telegram-bot-api:latest
+    container_name: xbot-api
     environment:
       TELEGRAM_API_ID: ${TELEGRAM_API_ID}
       TELEGRAM_API_HASH: ${TELEGRAM_API_HASH}
@@ -8,17 +9,19 @@ services:
       - ./telegram-api:/var/lib/telegram-bot-api
     restart: unless-stopped
 
-  x-downloader-bot:
+  bot:
     image: orangeqiu/x-downloader-bot:latest
+    container_name: xbot
     ports:
       - "3000:3000"
     environment:
       - BOT_TOKEN=${BOT_TOKEN}
       - PORT=3000
       - POLLING=${POLLING:-true}
-      - TELEGRAM_API_URL=${TELEGRAM_API_URL:-http://telegram-api:8081}
+      - TELEGRAM_API_URL=${TELEGRAM_API_URL:-http://api:8081}
     volumes:
       - ./data:/app/data
+      - ./downloads:/app/downloads
     restart: unless-stopped
     depends_on:
-      - telegram-api
+      - api

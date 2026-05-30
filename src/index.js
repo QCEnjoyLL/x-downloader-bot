@@ -1,7 +1,13 @@
 // X Downloader Bot for Telegram — Docker 部署版
 // 使用 fxtwitter 和 vxtwitter API 提取视频和图片
 
+import { writeFile, mkdir } from 'node:fs/promises';
+import { join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { getUserMode, setUserMode, getUserQuality, setUserQuality } from './store.js';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const DOWNLOADS_DIR = process.env.DOWNLOADS_DIR || join(__dirname, '..', 'downloads');
 
 // ==================== 工具函数 ====================
 
@@ -838,11 +844,18 @@ async function processTwitterUrlDownload(originalUrl, chatId, statusMessageId) {
           let videoSent = await sendVideoByUrl(chatId, selected.url, videoCaption);
 
           if (!videoSent) {
-            // 策略2: Worker 下载后上传
+            // 策略2: 下载后上传
             await updateStatusMessage(chatId, statusMessageId,
               `📥 下载视频 ${i + 1}/${mediaData.videos.length}${estimatedInfo}...`);
             try {
               const file = await downloadFile(selected.url, MAX_VIDEO_SIZE);
+
+              // 保存到磁盘
+              const timestamp = Date.now();
+              const ext = file.contentType.includes('mp4') ? 'mp4' : 'mp4';
+              const filename = `twitter_${username}_${statusId}_${timestamp}.${ext}`;
+              saveToDisk(filename, file.buffer).catch(() => {});
+
               await updateStatusMessage(chatId, statusMessageId,
                 `📤 上传视频 ${i + 1}/${mediaData.videos.length} ` +
                 `(${formatFileSize(file.size)})...`);
@@ -857,24 +870,28 @@ async function processTwitterUrlDownload(originalUrl, chatId, statusMessageId) {
               // 策略3: 作为文档上传（兜底）
               try {
                 const file = await downloadFile(selected.url, MAX_VIDEO_SIZE);
+                saveToDisk(`twitter_${username}_${statusId}_${Date.now()}.mp4`, file.buffer).catch(() => {});
                 await uploadDocumentFile(
                   chatId, file.buffer, 'video.mp4', file.contentType, videoCaption
                 );
               } catch (docErr) {
                 console.error('Document upload also failed:', docErr);
-                // 最终兜底：发送链接
-                await sendVideoLinks(chatId, video, i, mediaData.videos.length);
               }
             }
           }
+
+          // 无论上传成功与否，最后发送多清晰度链接
+          if (video.variants && video.variants.length > 1) {
+            await sendVideoLinks(chatId, video, i, mediaData.videos.length);
+          } else if (!videoSent) {
+            await sendVideoLinks(chatId, video, i, mediaData.videos.length);
+          }
         } else if (selected.reason === 'all_too_large') {
-          // 所有 variant 预估都超过限制
           await sendMessage(chatId,
             `⚠️ 视频文件过大（预估最小 ${formatFileSize(selected.minEstimatedSize)}，限制 ${SIZE_LABEL}）\n\n` +
             '正在发送链接，你可以在浏览器中下载...');
           await sendVideoLinks(chatId, video, i, mediaData.videos.length);
         } else {
-          // 没有可用 variant
           await sendMessage(chatId,
             '⚠️ 无法获取可用的视频下载链接\n\n正在发送链接...');
           await sendVideoLinks(chatId, video, i, mediaData.videos.length);
@@ -1045,6 +1062,18 @@ async function downloadFile(url, maxSizeBytes) {
 
   console.log(`Downloaded: ${formatFileSize(totalSize)} (${contentType})`);
   return { buffer: buffer.buffer, contentType, size: totalSize };
+}
+
+// 保存下载的文件到磁盘
+async function saveToDisk(filename, buffer) {
+  try {
+    await mkdir(DOWNLOADS_DIR, { recursive: true });
+    const filepath = join(DOWNLOADS_DIR, filename);
+    await writeFile(filepath, new Uint8Array(buffer));
+    console.log(`Saved to disk: ${filepath}`);
+  } catch (err) {
+    console.error('Failed to save file to disk:', err.message);
+  }
 }
 
 // ==================== 文件上传 (Telegram) ====================
