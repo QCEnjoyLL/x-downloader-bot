@@ -1,6 +1,6 @@
 {
   "name": "x-downloader-bot",
-  "version": "1.2.0",
+  "version": "1.4.0",
   "type": "module",
   "description": "Telegram bot for extracting Twitter/X media (videos and images) — Docker deployment",
   "main": "src/server.js",
