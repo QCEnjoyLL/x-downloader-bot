@@ -76,7 +76,7 @@ docker run -d \
 **Docker Compose（推荐）**
 
 ```bash
-wget https://raw.githubusercontent.com/orangeqiu/x-downloader-bot/main/docker-compose.yml
+wget https://raw.githubusercontent.com/QCEnjoyLL/x-downloader-bot/master/docker-compose.yml
 # .env 中填入 BOT_TOKEN、TELEGRAM_API_ID、TELEGRAM_API_HASH
 docker compose up -d
 ```
