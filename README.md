@@ -21,11 +21,21 @@
 
 ### 2. 部署
 
-```bash
-# 从 Docker Hub 拉取
-docker pull orangeqiu/x-downloader-bot
+**Docker CLI**
 
-# 或用 docker-compose
+```bash
+docker run -d \
+  --name x-downloader-bot \
+  -e BOT_TOKEN=你的token \
+  -v $(pwd)/data:/app/data \
+  -p 3000:3000 \
+  --restart unless-stopped \
+  orangeqiu/x-downloader-bot:latest
+```
+
+**Docker Compose**
+
+```bash
 wget https://raw.githubusercontent.com/orangeqiu/x-downloader-bot/main/docker-compose.yml
 echo "BOT_TOKEN=你的token" > .env
 docker compose up -d
@@ -35,7 +45,7 @@ docker compose up -d
 
 浏览器打开 `http://你的服务器IP:3000/setup-webhook`，点击设置按钮即可。
 
-> Telegram 要求 webhook URL 必须是 **HTTPS**。建议使用 nginx 反向代理 + Let's Encrypt，或 [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/)。
+> Telegram 要求 webhook URL 必须是 **HTTPS**。建议 nginx 反向代理 + Let's Encrypt，或 [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/)。
 
 ## 命令
 
@@ -63,6 +73,17 @@ cp .env.example .env    # 编辑填入 BOT_TOKEN
 npm install
 npm run dev             # 热重载
 ```
+
+## 镜像标签
+
+每次推送到 main 分支自动构建以下标签：
+
+| 标签 | 说明 |
+|------|------|
+| `latest` | 最新版本 |
+| `1.2.0` | 完整版本号 |
+| `1.2` | 次版本号 |
+| `1` | 主版本号 |
 
 ## 技术栈
 

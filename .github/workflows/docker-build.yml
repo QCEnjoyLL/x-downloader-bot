@@ -3,7 +3,6 @@ name: Build and Push Docker Image
 on:
   push:
     branches: [main]
-    tags: ['v*']
   workflow_dispatch:
 
 jobs:
@@ -12,6 +11,14 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Read version from package.json
+        id: version
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "major=$(echo $VERSION | cut -d. -f1)" >> $GITHUB_OUTPUT
+          echo "minor=$(echo $VERSION | cut -d. -f1,2)" >> $GITHUB_OUTPUT
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -31,9 +38,10 @@ jobs:
         with:
           images: ${{ secrets.DOCKERHUB_USERNAME }}/x-downloader-bot
           tags: |
-            type=ref,event=branch
-            type=ref,event=tag
-            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+            type=raw,value=latest
+            type=raw,value=${{ steps.version.outputs.version }}
+            type=raw,value=${{ steps.version.outputs.minor }}
+            type=raw,value=${{ steps.version.outputs.major }}
 
       - name: Build and push
         uses: docker/build-push-action@v5
