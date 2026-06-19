@@ -2,6 +2,7 @@
 // 使用 fxtwitter 和 vxtwitter API 提取视频和图片
 
 import { writeFile, readFile, mkdir, rm, stat } from 'node:fs/promises';
+import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
@@ -10,6 +11,12 @@ import { getUserMode, setUserMode, getUserQuality, setUserQuality } from './stor
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DOWNLOADS_DIR = process.env.DOWNLOADS_DIR || join(__dirname, '..', 'downloads');
 const CLEANUP_VIDEOS = process.env.CLEANUP_VIDEOS !== 'false';  // 默认 true
+
+// 版本号（从 package.json 读取一次，用于 /start 展示）
+const VERSION = (() => {
+  try { return JSON.parse(readFileSync(join(__dirname, '..', 'package.json'), 'utf-8')).version; }
+  catch { return 'unknown'; }
+})();
 
 // ==================== 工具函数 ====================
 
@@ -90,11 +97,13 @@ export async function handleTelegramWebhook(update) {
           '3️⃣ 等待下载上传，接收视频文件\n\n' +
           '🔗 支持格式：\n' +
           '• x.com/用户/status/推文ID\n' +
-          '• twitter.com/用户/status/推文ID\n\n' +
+          '• twitter.com/用户/status/推文ID\n' +
+          '• x.com/i/broadcasts/ID（直播回放）\n\n' +
           '⚙️ 命令：\n' +
           '/mode — 切换下载/链接模式\n' +
           '/quality — 调整视频画质（高/中/低）\n\n' +
-          '💡 默认：📥下载模式 + 🎯最高清'
+          '💡 默认：📥下载模式 + 🎯最高清\n' +
+          `🏷️ 版本：v${VERSION}`
         );
         return;
       }
@@ -917,6 +926,26 @@ function downloadBroadcastWithYtDlp(broadcastUrl, outPath, maxSizeBytes, onProgr
   });
 }
 
+// 用 ffprobe 读取视频真实宽高（ffmpeg 自带），失败返回 [0,0]
+function getVideoDimensions(filePath) {
+  return new Promise((resolve) => {
+    const proc = spawn('ffprobe', [
+      '-v', 'error',
+      '-select_streams', 'v:0',
+      '-show_entries', 'stream=width,height',
+      '-of', 'csv=s=x:p=0',
+      filePath
+    ], { windowsHide: true });
+    let out = '';
+    proc.stdout.on('data', d => { out += d.toString(); });
+    proc.on('error', () => resolve([0, 0]));
+    proc.on('close', () => {
+      const m = out.trim().match(/(\d+)x(\d+)/);
+      resolve(m ? [parseInt(m[1]), parseInt(m[2])] : [0, 0]);
+    });
+  });
+}
+
 // 兜底：可选第三方解析。设置 BROADCAST_RESOLVER_URL（含 {url} 占位）即启用，
 // 期望返回的文本/JSON 中包含直链 mp4。未配置或失败则返回 null（降级为手动提示）。
 async function resolveBroadcastViaThirdParty(broadcastUrl) {
@@ -975,9 +1004,10 @@ async function processBroadcastUrl(broadcastUrl, chatId, statusMessageId, replyT
       await updateStatusMessage(chatId, statusMessageId, '✅ 处理完成！');
       return;
     }
-    await updateStatusMessage(chatId, statusMessageId, `📤 上传直播回放（${formatFileSize(st.size)}）...`);
+    const [bw, bh] = await getVideoDimensions(outPath);
+    await updateStatusMessage(chatId, statusMessageId, `📤 上传直播回放${bw ? ` ${bw}x${bh}` : ''}（${formatFileSize(st.size)}）...`);
     const buffer = await readFile(outPath);
-    let sent = await uploadVideoFile(chatId, buffer, 'video/mp4', caption, null, null, null, replyToMessageId);
+    let sent = await uploadVideoFile(chatId, buffer, 'video/mp4', caption, null, bw, bh, replyToMessageId);
     if (!sent) sent = await uploadDocumentFile(chatId, buffer, `${bid}.mp4`, 'video/mp4', caption, replyToMessageId);
     if (sent && CLEANUP_VIDEOS) await cleanupFile(outPath);
     if (sent) {
