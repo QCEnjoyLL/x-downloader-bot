@@ -1553,20 +1553,20 @@ async function uploadVideoFile(chatId, buffer, contentType, caption, thumbnailUr
   if (replyToMessageId) { fields.reply_to_message_id = String(replyToMessageId); fields.allow_sending_without_reply = 'true'; }
 
   console.log(`Uploading video: ${formatFileSize(buffer.byteLength)} ${width ? `${width}x${height}` : ''}`);
+  // 优先流式上传（带进度）；任何失败（抛错或 ok:false）都回退到已验证可用的 fetch
   try {
     const res = await uploadMultipart(endpoint, fields, { field: 'video', filename: 'video.mp4', contentType, data: buffer }, onProgress);
     const result = JSON.parse(res.body);
-    if (!result.ok) { console.error('sendVideo (stream) failed:', result.description); return false; }
-    console.log('Video uploaded successfully');
-    return true;
+    if (result.ok) { console.log('Video uploaded successfully'); return true; }
+    console.error('sendVideo (stream) rejected, trying fetch:', result.description);
   } catch (error) {
-    console.error('Video upload (stream) error, fallback to fetch:', error.message);
-    try {
-      const result = await uploadViaFetch(endpoint, fields, 'video', 'video.mp4', buffer, contentType);
-      if (!result.ok) { console.error('sendVideo (fetch) failed:', result.description); return false; }
-      return true;
-    } catch (e2) { console.error('Video upload fallback error:', e2); return false; }
+    console.error('sendVideo (stream) error, trying fetch:', error.message);
   }
+  try {
+    const result = await uploadViaFetch(endpoint, fields, 'video', 'video.mp4', buffer, contentType);
+    if (!result.ok) { console.error('sendVideo (fetch) failed:', result.description); return false; }
+    return true;
+  } catch (e2) { console.error('sendVideo fallback error:', e2.message); return false; }
 }
 
 async function uploadPhotoFile(chatId, buffer, contentType, caption) {
@@ -1615,17 +1615,16 @@ async function uploadDocumentFile(chatId, buffer, filename, contentType, caption
   try {
     const res = await uploadMultipart(endpoint, fields, { field: 'document', filename, contentType, data: buffer }, onProgress);
     const result = JSON.parse(res.body);
-    if (!result.ok) { console.error('sendDocument (stream) failed:', result.description); return false; }
-    console.log('Document uploaded successfully');
-    return true;
+    if (result.ok) { console.log('Document uploaded successfully'); return true; }
+    console.error('sendDocument (stream) rejected, trying fetch:', result.description);
   } catch (error) {
-    console.error('Document upload (stream) error, fallback to fetch:', error.message);
-    try {
-      const result = await uploadViaFetch(endpoint, fields, 'document', filename, buffer, contentType);
-      if (!result.ok) { console.error('sendDocument (fetch) failed:', result.description); return false; }
-      return true;
-    } catch (e2) { console.error('Document upload fallback error:', e2); return false; }
+    console.error('sendDocument (stream) error, trying fetch:', error.message);
   }
+  try {
+    const result = await uploadViaFetch(endpoint, fields, 'document', filename, buffer, contentType);
+    if (!result.ok) { console.error('sendDocument (fetch) failed:', result.description); return false; }
+    return true;
+  } catch (e2) { console.error('sendDocument fallback error:', e2.message); return false; }
 }
 
 async function sendVideoByUrl(chatId, videoUrl, caption, width, height, replyToMessageId) {
