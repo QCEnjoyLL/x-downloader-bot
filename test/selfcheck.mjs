@@ -1,7 +1,8 @@
 // 最小自测（无框架）：node test/selfcheck.mjs
 // 覆盖三处新逻辑：直播回放链接识别、并发上限执行器、按真实大小选 variant。
 import assert from 'node:assert/strict';
-import { extractBroadcastUrls, runWithLimit, selectVideoVariant } from '../src/index.js';
+import { createServer } from 'node:http';
+import { extractBroadcastUrls, runWithLimit, selectVideoVariant, uploadMultipart } from '../src/index.js';
 
 // 1) extractBroadcastUrls：命中 broadcasts，不误匹配普通 status
 {
@@ -69,6 +70,50 @@ import { extractBroadcastUrls, runWithLimit, selectVideoVariant } from '../src/i
     assert.equal(tooBig.minEstimatedSize, sizes['http://v/low.mp4'], '应报最小真实大小');
   } finally {
     globalThis.fetch = realFetch;
+  }
+}
+
+// 4) uploadMultipart：本地 http 服务器验证 Content-Length 正确、multipart 完整、进度单调到 total
+{
+  const progresses = [];
+  const fileData = new TextEncoder().encode('HELLODATA'.repeat(20000)); // ~180KB，跨多个块
+  const server = createServer();
+  const result = await new Promise((resolve, reject) => {
+    server.on('request', (req, res) => {
+      const cl = parseInt(req.headers['content-length'] || '0');
+      const chunks = [];
+      req.on('data', c => chunks.push(c));
+      req.on('end', () => {
+        const body = Buffer.concat(chunks);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true }));
+        resolve({ cl, received: body.length, body: body.toString('latin1') });
+      });
+    });
+    server.on('error', reject);
+    server.listen(0, '127.0.0.1', async () => {
+      try {
+        const port = server.address().port;
+        const res = await uploadMultipart(
+          `http://127.0.0.1:${port}/`,
+          { chat_id: '123', caption: 'hi', skip: '' },
+          { field: 'document', filename: 't.bin', contentType: 'application/octet-stream', data: fileData },
+          (sent, total) => progresses.push([sent, total])
+        );
+        assert.equal(JSON.parse(res.body).ok, true, 'uploadMultipart 应解析到 ok');
+      } catch (e) { reject(e); }
+    });
+  });
+  server.close();
+  assert.equal(result.cl, result.received, 'Content-Length 应等于实际收到字节数');
+  assert.ok(result.body.includes('filename="t.bin"'), 'multipart 应含文件名');
+  assert.ok(result.body.includes('HELLODATA'), 'multipart 应含文件数据');
+  assert.ok(!result.body.includes('name="skip"'), '空字段应被跳过');
+  assert.ok(progresses.length > 0, '应有上传进度回调');
+  const lastP = progresses[progresses.length - 1];
+  assert.equal(lastP[0], lastP[1], '最终进度应等于 total');
+  for (let k = 1; k < progresses.length; k++) {
+    assert.ok(progresses[k][0] >= progresses[k - 1][0], '进度应单调不减');
   }
 }
 

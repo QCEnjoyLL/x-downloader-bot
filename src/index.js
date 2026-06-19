@@ -6,6 +6,8 @@ import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
+import { request as httpRequest } from 'node:http';
+import { request as httpsRequest } from 'node:https';
 import { getUserMode, setUserMode, getUserQuality, setUserQuality } from './store.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -241,7 +243,7 @@ async function processDirectVideoUrls(urls, chatId, statusMsgId, replyToMessageI
       `📥 下载视频${label}...`);
 
     try {
-      const onProg = makeDownloadProgress(chatId, statusMsgId, `下载视频${label}`);
+      const onProg = makeProgress(chatId, statusMsgId, `下载视频${label}`);
       const file = await downloadFile(url, MAX_SIZE, onProg);
 
       // 从 URL 提取文件名
@@ -257,15 +259,16 @@ async function processDirectVideoUrls(urls, chatId, statusMsgId, replyToMessageI
       await updateStatusMessage(chatId, statusMsgId,
         `📤 上传视频${label}${dimInfo} (${formatFileSize(file.size)})...`);
 
+      const onUp = makeProgress(chatId, statusMsgId, `上传视频${label}`, '📤');
       let videoSent = await uploadVideoFile(
         chatId, file.buffer, file.contentType,
-        `🎬 视频直链${label}${dimInfo}`, null, dw, dh, replyToMessageId
+        `🎬 视频直链${label}${dimInfo}`, null, dw, dh, replyToMessageId, onUp
       );
 
       if (!videoSent) {
         videoSent = await uploadDocumentFile(
           chatId, file.buffer, filename, file.contentType,
-          `🎬 视频直链${label}`, replyToMessageId
+          `🎬 视频直链${label}`, replyToMessageId, onUp
         );
       }
 
@@ -1007,8 +1010,9 @@ async function processBroadcastUrl(broadcastUrl, chatId, statusMessageId, replyT
     const [bw, bh] = await getVideoDimensions(outPath);
     await updateStatusMessage(chatId, statusMessageId, `📤 上传直播回放${bw ? ` ${bw}x${bh}` : ''}（${formatFileSize(st.size)}）...`);
     const buffer = await readFile(outPath);
-    let sent = await uploadVideoFile(chatId, buffer, 'video/mp4', caption, null, bw, bh, replyToMessageId);
-    if (!sent) sent = await uploadDocumentFile(chatId, buffer, `${bid}.mp4`, 'video/mp4', caption, replyToMessageId);
+    const onUp = makeProgress(chatId, statusMessageId, `上传直播回放 ${bid}`, '📤');
+    let sent = await uploadVideoFile(chatId, buffer, 'video/mp4', caption, null, bw, bh, replyToMessageId, onUp);
+    if (!sent) sent = await uploadDocumentFile(chatId, buffer, `${bid}.mp4`, 'video/mp4', caption, replyToMessageId, onUp);
     if (sent && CLEANUP_VIDEOS) await cleanupFile(outPath);
     if (sent) {
       await updateStatusMessage(chatId, statusMessageId, '✅ 处理完成！');
@@ -1026,8 +1030,9 @@ async function processBroadcastUrl(broadcastUrl, chatId, statusMessageId, replyT
     try {
       const file = await downloadFile(directUrl, MAX_SIZE);
       await updateStatusMessage(chatId, statusMessageId, `📤 上传直播回放（${formatFileSize(file.size)}）...`);
-      let sent = await uploadVideoFile(chatId, file.buffer, file.contentType, caption, null, null, null, replyToMessageId);
-      if (!sent) sent = await uploadDocumentFile(chatId, file.buffer, `${bid}.mp4`, file.contentType, caption, replyToMessageId);
+      const onUp = makeProgress(chatId, statusMessageId, `上传直播回放 ${bid}`, '📤');
+      let sent = await uploadVideoFile(chatId, file.buffer, file.contentType, caption, null, null, null, replyToMessageId, onUp);
+      if (!sent) sent = await uploadDocumentFile(chatId, file.buffer, `${bid}.mp4`, file.contentType, caption, replyToMessageId, onUp);
       if (sent) {
         await updateStatusMessage(chatId, statusMessageId, '✅ 处理完成！');
         return;
@@ -1178,7 +1183,7 @@ async function processTwitterUrlDownload(originalUrl, chatId, statusMessageId, r
               `📥 下载视频 ${i + 1}/${mediaData.videos.length}${tryInfo}...`);
             let savedPath = null;
             try {
-              const onProg = makeDownloadProgress(chatId, statusMessageId, `下载视频 ${i + 1}/${mediaData.videos.length}`);
+              const onProg = makeProgress(chatId, statusMessageId, `下载视频 ${i + 1}/${mediaData.videos.length}`);
               const file = await downloadFile(tryUrl, MAX_VIDEO_SIZE, onProg);
 
               const timestamp = Date.now();
@@ -1188,8 +1193,9 @@ async function processTwitterUrlDownload(originalUrl, chatId, statusMessageId, r
               await updateStatusMessage(chatId, statusMessageId,
                 `📤 上传视频 ${i + 1}/${mediaData.videos.length} ` +
                 `(${formatFileSize(file.size)})...`);
+              const onUp = makeProgress(chatId, statusMessageId, `上传视频 ${i + 1}/${mediaData.videos.length}`, '📤');
               videoSent = await uploadVideoFile(
-                chatId, file.buffer, file.contentType, videoCaption, video.thumbnailUrl, vidW, vidH, replyToMessageId
+                chatId, file.buffer, file.contentType, videoCaption, video.thumbnailUrl, vidW, vidH, replyToMessageId, onUp
               );
 
               if (videoSent) {
@@ -1202,7 +1208,7 @@ async function processTwitterUrlDownload(originalUrl, chatId, statusMessageId, r
 
               // 策略3: 作为文档上传
               videoSent = await uploadDocumentFile(
-                chatId, file.buffer, 'video.mp4', file.contentType, videoCaption, replyToMessageId
+                chatId, file.buffer, 'video.mp4', file.contentType, videoCaption, replyToMessageId, onUp
               );
               if (videoSent && CLEANUP_VIDEOS && savedPath) {
                 await cleanupFile(savedPath);
@@ -1341,18 +1347,18 @@ export async function selectVideoVariant(video, qualityPreference, maxSizeBytes)
 
 // ==================== 文件下载 ====================
 
-// 生成节流的下载进度回调：每 ~4 秒把百分比刷到状态消息
-function makeDownloadProgress(chatId, statusMessageId, label) {
+// 生成节流的进度回调：每 ~4 秒把百分比刷到状态消息（emoji 区分下载/上传）
+function makeProgress(chatId, statusMessageId, label, emoji = '📥') {
   let last = 0;
-  return (downloaded, total) => {
+  return (done, total) => {
     const now = Date.now();
     if (now - last < 4000) return;
     last = now;
-    const pct = total ? ` ${(downloaded / total * 100).toFixed(0)}%` : '';
+    const pct = total ? ` ${(done / total * 100).toFixed(0)}%` : '';
     const info = total
-      ? ` (${formatFileSize(downloaded)}/${formatFileSize(total)})`
-      : ` (${formatFileSize(downloaded)})`;
-    updateStatusMessage(chatId, statusMessageId, `📥 ${label}${pct}${info}...`).catch(() => {});
+      ? ` (${formatFileSize(done)}/${formatFileSize(total)})`
+      : ` (${formatFileSize(done)})`;
+    updateStatusMessage(chatId, statusMessageId, `${emoji} ${label}${pct}${info}...`).catch(() => {});
   };
 }
 
@@ -1456,44 +1462,110 @@ async function cleanupFile(filepath) {
 
 // ==================== 文件上传 (Telegram) ====================
 
-async function uploadVideoFile(chatId, buffer, contentType, caption, thumbnailUrl, width, height, replyToMessageId) {
-  try {
-    const botToken = getBotToken();
-    if (!botToken) return false;
+// 流式 multipart 上传：用 http/https 手写请求，带 Content-Length，按块写文件并上报进度
+// （Node 的 fetch/FormData 无法获取上传进度，故走底层请求）
+export function uploadMultipart(urlStr, fields, file, onProgress, timeoutMs = 600000) {
+  return new Promise((resolve, reject) => {
+    const u = new URL(urlStr);
+    const isHttps = u.protocol === 'https:';
+    const reqFn = isHttps ? httpsRequest : httpRequest;
+    const boundary = '----xbot' + Date.now().toString(16) + Math.floor(Math.random() * 1e9).toString(16);
+    const enc = new TextEncoder();
 
-    const formData = new FormData();
-    formData.append('chat_id', chatId.toString());
-    formData.append('video', new Blob([buffer], { type: contentType }), 'video.mp4');
-    if (caption) formData.append('caption', caption);
-    if (thumbnailUrl) formData.append('thumb', thumbnailUrl);
-    if (width) formData.append('width', String(width));
-    if (height) formData.append('height', String(height));
-    formData.append('supports_streaming', 'true');
-    if (replyToMessageId) {
-      formData.append('reply_to_message_id', String(replyToMessageId));
-      formData.append('allow_sending_without_reply', 'true');
+    const fieldParts = [];
+    for (const [name, value] of Object.entries(fields)) {
+      if (value === undefined || value === null || value === '') continue;
+      fieldParts.push(enc.encode(`--${boundary}\r\nContent-Disposition: form-data; name="${name}"\r\n\r\n${value}\r\n`));
     }
+    const fileHeader = enc.encode(
+      `--${boundary}\r\nContent-Disposition: form-data; name="${file.field}"; filename="${file.filename}"\r\n` +
+      `Content-Type: ${file.contentType}\r\n\r\n`
+    );
+    const fileData = file.data instanceof Uint8Array ? file.data : new Uint8Array(file.data);
+    const tail = enc.encode(`\r\n--${boundary}--\r\n`);
 
-    console.log(`Uploading video: ${formatFileSize(buffer.byteLength)} ${width ? `${width}x${height}` : ''}`);
+    const headerBytes = fieldParts.reduce((s, p) => s + p.length, 0) + fileHeader.length;
+    const total = headerBytes + fileData.length + tail.length;
 
-    const response = await fetch(`${getTelegramApiUrl()}/bot${botToken}/sendVideo`, {
+    const req = reqFn({
+      hostname: u.hostname,
+      port: u.port || (isHttps ? 443 : 80),
+      path: u.pathname + u.search,
       method: 'POST',
-      body: formData,
-      signal: AbortSignal.timeout(120000)
+      headers: {
+        'Content-Type': `multipart/form-data; boundary=${boundary}`,
+        'Content-Length': total
+      }
+    }, (res) => {
+      let body = '';
+      res.setEncoding('utf8');
+      res.on('data', d => { body += d; });
+      res.on('end', () => resolve({ status: res.statusCode, body }));
     });
+    req.on('error', reject);
+    req.setTimeout(timeoutMs, () => req.destroy(new Error('upload timeout')));
 
-    const result = await response.json();
+    for (const p of fieldParts) req.write(p);
+    req.write(fileHeader);
 
-    if (!result.ok) {
-      console.error('sendVideo (multipart) failed:', result.description);
-      return false;
-    }
+    // 文件分块写入 + 进度，遵守背压（write 返回 false 时等 drain）
+    let sent = headerBytes;
+    const CHUNK = 512 * 1024;
+    let i = 0;
+    const pump = () => {
+      while (i < fileData.length) {
+        const slice = fileData.subarray(i, Math.min(i + CHUNK, fileData.length));
+        i += slice.length;
+        sent += slice.length;
+        if (onProgress) onProgress(sent, total);
+        if (!req.write(slice)) { req.once('drain', pump); return; }
+      }
+      req.write(tail);
+      sent += tail.length;
+      if (onProgress) onProgress(sent, total);
+      req.end();
+    };
+    pump();
+  });
+}
 
+// fetch 回退（无进度），仅在流式上传抛传输错误时兜底，保证核心上传不被新代码破坏
+async function uploadViaFetch(endpoint, fields, fileField, filename, buffer, contentType, timeoutMs = 120000) {
+  const formData = new FormData();
+  for (const [k, v] of Object.entries(fields)) {
+    if (v !== undefined && v !== null && v !== '') formData.append(k, String(v));
+  }
+  formData.append(fileField, new Blob([buffer], { type: contentType }), filename);
+  const response = await fetch(endpoint, { method: 'POST', body: formData, signal: AbortSignal.timeout(timeoutMs) });
+  return await response.json();
+}
+
+async function uploadVideoFile(chatId, buffer, contentType, caption, thumbnailUrl, width, height, replyToMessageId, onProgress) {
+  const botToken = getBotToken();
+  if (!botToken) return false;
+
+  const endpoint = `${getTelegramApiUrl()}/bot${botToken}/sendVideo`;
+  const fields = { chat_id: String(chatId), supports_streaming: 'true' };
+  if (caption) fields.caption = caption;
+  if (thumbnailUrl) fields.thumb = thumbnailUrl;
+  if (width) fields.width = String(width);
+  if (height) fields.height = String(height);
+  if (replyToMessageId) { fields.reply_to_message_id = String(replyToMessageId); fields.allow_sending_without_reply = 'true'; }
+
+  console.log(`Uploading video: ${formatFileSize(buffer.byteLength)} ${width ? `${width}x${height}` : ''}`);
+  try {
+    const res = await uploadMultipart(endpoint, fields, { field: 'video', filename: 'video.mp4', contentType, data: buffer }, onProgress);
+    const result = JSON.parse(res.body);
+    if (!result.ok) { console.error('sendVideo (stream) failed:', result.description); return false; }
     console.log('Video uploaded successfully');
     return true;
   } catch (error) {
-    console.error('Error uploading video:', error);
-    return false;
+    console.error('Video upload (stream) error, fallback to fetch:', error.message);
+    try {
+      const result = await uploadViaFetch(endpoint, fields, 'video', 'video.mp4', buffer, contentType);
+      if (!result.ok) { console.error('sendVideo (fetch) failed:', result.description); return false; }
+      return true;
+    } catch (e2) { console.error('Video upload fallback error:', e2); return false; }
   }
 }
 
@@ -1530,40 +1602,29 @@ async function uploadPhotoFile(chatId, buffer, contentType, caption) {
   }
 }
 
-async function uploadDocumentFile(chatId, buffer, filename, contentType, caption, replyToMessageId) {
+async function uploadDocumentFile(chatId, buffer, filename, contentType, caption, replyToMessageId, onProgress) {
+  const botToken = getBotToken();
+  if (!botToken) return false;
+
+  const endpoint = `${getTelegramApiUrl()}/bot${botToken}/sendDocument`;
+  const fields = { chat_id: String(chatId) };
+  if (caption) fields.caption = caption;
+  if (replyToMessageId) { fields.reply_to_message_id = String(replyToMessageId); fields.allow_sending_without_reply = 'true'; }
+
+  console.log(`Uploading document: ${formatFileSize(buffer.byteLength)}`);
   try {
-    const botToken = getBotToken();
-    if (!botToken) return false;
-
-    const formData = new FormData();
-    formData.append('chat_id', chatId.toString());
-    formData.append('document', new Blob([buffer], { type: contentType }), filename);
-    if (caption) formData.append('caption', caption);
-    if (replyToMessageId) {
-      formData.append('reply_to_message_id', String(replyToMessageId));
-      formData.append('allow_sending_without_reply', 'true');
-    }
-
-    console.log(`Uploading document: ${formatFileSize(buffer.byteLength)}`);
-
-    const response = await fetch(`${getTelegramApiUrl()}/bot${botToken}/sendDocument`, {
-      method: 'POST',
-      body: formData,
-      signal: AbortSignal.timeout(120000)
-    });
-
-    const result = await response.json();
-
-    if (!result.ok) {
-      console.error('sendDocument failed:', result.description);
-      return false;
-    }
-
+    const res = await uploadMultipart(endpoint, fields, { field: 'document', filename, contentType, data: buffer }, onProgress);
+    const result = JSON.parse(res.body);
+    if (!result.ok) { console.error('sendDocument (stream) failed:', result.description); return false; }
     console.log('Document uploaded successfully');
     return true;
   } catch (error) {
-    console.error('Error uploading document:', error);
-    return false;
+    console.error('Document upload (stream) error, fallback to fetch:', error.message);
+    try {
+      const result = await uploadViaFetch(endpoint, fields, 'document', filename, buffer, contentType);
+      if (!result.ok) { console.error('sendDocument (fetch) failed:', result.description); return false; }
+      return true;
+    } catch (e2) { console.error('Document upload fallback error:', e2); return false; }
   }
 }
 
