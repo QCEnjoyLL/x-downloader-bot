@@ -232,7 +232,8 @@ async function processDirectVideoUrls(urls, chatId, statusMsgId, replyToMessageI
       `📥 下载视频${label}...`);
 
     try {
-      const file = await downloadFile(url, MAX_SIZE);
+      const onProg = makeDownloadProgress(chatId, statusMsgId, `下载视频${label}`);
+      const file = await downloadFile(url, MAX_SIZE, onProg);
 
       // 从 URL 提取文件名
       const urlPath = new URL(url).pathname;
@@ -1147,7 +1148,8 @@ async function processTwitterUrlDownload(originalUrl, chatId, statusMessageId, r
               `📥 下载视频 ${i + 1}/${mediaData.videos.length}${tryInfo}...`);
             let savedPath = null;
             try {
-              const file = await downloadFile(tryUrl, MAX_VIDEO_SIZE);
+              const onProg = makeDownloadProgress(chatId, statusMessageId, `下载视频 ${i + 1}/${mediaData.videos.length}`);
+              const file = await downloadFile(tryUrl, MAX_VIDEO_SIZE, onProg);
 
               const timestamp = Date.now();
               const filename = `twitter_${username}_${statusId}_${timestamp}.mp4`;
@@ -1309,7 +1311,22 @@ export async function selectVideoVariant(video, qualityPreference, maxSizeBytes)
 
 // ==================== 文件下载 ====================
 
-async function downloadFile(url, maxSizeBytes) {
+// 生成节流的下载进度回调：每 ~4 秒把百分比刷到状态消息
+function makeDownloadProgress(chatId, statusMessageId, label) {
+  let last = 0;
+  return (downloaded, total) => {
+    const now = Date.now();
+    if (now - last < 4000) return;
+    last = now;
+    const pct = total ? ` ${(downloaded / total * 100).toFixed(0)}%` : '';
+    const info = total
+      ? ` (${formatFileSize(downloaded)}/${formatFileSize(total)})`
+      : ` (${formatFileSize(downloaded)})`;
+    updateStatusMessage(chatId, statusMessageId, `📥 ${label}${pct}${info}...`).catch(() => {});
+  };
+}
+
+async function downloadFile(url, maxSizeBytes, onProgress) {
   console.log(`Downloading: ${url.substring(0, 80)}... (max: ${formatFileSize(maxSizeBytes)})`);
 
   // HEAD 预检查大小
@@ -1333,12 +1350,12 @@ async function downloadFile(url, maxSizeBytes) {
     console.log('HEAD request failed, proceeding with GET:', error.message);
   }
 
-  // GET 下载
+  // GET 下载（大文件给 10 分钟，避免被 60s 总超时打断）
   const response = await fetch(url, {
     headers: {
       'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
     },
-    signal: AbortSignal.timeout(60000)
+    signal: AbortSignal.timeout(600000)
   });
 
   if (!response.ok) {
@@ -1349,11 +1366,12 @@ async function downloadFile(url, maxSizeBytes) {
 
   // 检查 Content-Length
   const contentLength = response.headers.get('Content-Length');
-  if (contentLength && parseInt(contentLength) > maxSizeBytes) {
-    throw new Error(`SIZE_EXCEEDED: ${formatFileSize(parseInt(contentLength))} > ${formatFileSize(maxSizeBytes)}`);
+  const totalBytes = contentLength ? parseInt(contentLength) : 0;
+  if (totalBytes && totalBytes > maxSizeBytes) {
+    throw new Error(`SIZE_EXCEEDED: ${formatFileSize(totalBytes)} > ${formatFileSize(maxSizeBytes)}`);
   }
 
-  // 流式读取，超过限制时中止
+  // 流式读取，超过限制时中止，并上报进度
   const reader = response.body.getReader();
   const chunks = [];
   let totalSize = 0;
@@ -1368,6 +1386,7 @@ async function downloadFile(url, maxSizeBytes) {
       throw new Error(`SIZE_EXCEEDED: File exceeds ${formatFileSize(maxSizeBytes)}`);
     }
     chunks.push(value);
+    if (onProgress) onProgress(totalSize, totalBytes);
   }
 
   // 合并 chunks

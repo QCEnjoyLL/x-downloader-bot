@@ -125,7 +125,7 @@ docker compose up -d
 
 ## 镜像标签与发行版
 
-每次推送 master 自动构建，版本号从 `package.json` 读取，手动修改即可控制版本。构建成功后还会**自动创建对应的 GitHub Release**（含源码 zip/tar.gz）。
+每次推送 master 自动构建，版本号从 `package.json` 读取，手动修改即可控制版本。构建成功后还会**自动创建对应的 GitHub Release**（含源码 zip/tar.gz），更新说明取自 [`CHANGELOG.md`](CHANGELOG.md) 中对应版本段落。
 
 | 标签 | 说明 |
 |------|------|
