@@ -876,7 +876,7 @@ async function processUrlsDownload(twitterUrls, chatId, replyToMessageId) {
 // ==================== 直播回放（broadcasts）====================
 
 // 用 yt-dlp 下载直播回放到本地 mp4（自带 X broadcast extractor，调 ffmpeg 合并 HLS 切片）
-function downloadBroadcastWithYtDlp(broadcastUrl, outPath, maxSizeBytes) {
+function downloadBroadcastWithYtDlp(broadcastUrl, outPath, maxSizeBytes, onProgress) {
   return new Promise((resolve, reject) => {
     const args = [
       broadcastUrl,
@@ -884,15 +884,30 @@ function downloadBroadcastWithYtDlp(broadcastUrl, outPath, maxSizeBytes) {
       '--no-playlist',
       '--no-warnings',
       '--no-part',
+      '--newline',
       '--merge-output-format', 'mp4',
       '--max-filesize', String(maxSizeBytes)
     ];
+    console.log(`[yt-dlp] start: ${broadcastUrl} -> ${outPath}`);
     const proc = spawn('yt-dlp', args, { windowsHide: true });
     let stderr = '';
-    proc.stderr.on('data', d => { stderr += d.toString(); });
+    // 进度和报错都透传到容器日志，并把下载百分比回调给上层更新 Telegram
+    const handle = (buf) => {
+      const s = buf.toString();
+      stderr += s;
+      for (const line of s.split(/\r?\n/)) {
+        const t = line.trim();
+        if (!t) continue;
+        console.log('[yt-dlp]', t);
+        const m = t.match(/\[download\]\s+([\d.]+)%/);
+        if (m && onProgress) onProgress(parseFloat(m[1]));
+      }
+    };
+    proc.stdout.on('data', handle);
+    proc.stderr.on('data', handle);
     proc.on('error', err => reject(new Error(`yt-dlp 不可用: ${err.message}`)));
     // 直播回放可能很长，给 30 分钟超时
-    const timer = setTimeout(() => { proc.kill('SIGKILL'); reject(new Error('yt-dlp 超时')); }, 30 * 60 * 1000);
+    const timer = setTimeout(() => { proc.kill('SIGKILL'); reject(new Error('yt-dlp 超时(30分钟)')); }, 30 * 60 * 1000);
     proc.on('close', code => {
       clearTimeout(timer);
       if (code === 0) resolve();
@@ -944,7 +959,14 @@ async function processBroadcastUrl(broadcastUrl, chatId, statusMessageId, replyT
   const outPath = join(DOWNLOADS_DIR, `broadcast_${bid}_${Date.now()}.mp4`);
   try {
     await mkdir(DOWNLOADS_DIR, { recursive: true });
-    await downloadBroadcastWithYtDlp(broadcastUrl, outPath, MAX_SIZE);
+    let lastEdit = 0;
+    await downloadBroadcastWithYtDlp(broadcastUrl, outPath, MAX_SIZE, (pct) => {
+      const now = Date.now();
+      if (now - lastEdit >= 5000) {
+        lastEdit = now;
+        updateStatusMessage(chatId, statusMessageId, `🔴 下载直播回放 ${bid}… ${pct.toFixed(1)}%`).catch(() => {});
+      }
+    });
     const st = await stat(outPath);
     if (st.size > MAX_SIZE) {
       await sendMessage(chatId, `⚠️ 直播回放过大（${formatFileSize(st.size)} > ${SIZE_LABEL}），无法上传`, replyToMessageId);
