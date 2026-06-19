@@ -7,6 +7,9 @@
 ## 功能
 
 - 🎬 自动解析 Twitter/X 链接，提取视频和图片
+- 🔴 支持**直播回放**（`x.com/i/broadcasts/...`）解析（内置 yt-dlp + ffmpeg，合并 HLS 为 mp4）
+- ⚡ **多链接并发**处理，回复迅速；每个视频引用你发送的原链接，方便对应
+- 📏 下载前用 HEAD 取**真实文件大小**（不再是粗略预估）
 - 📥 默认下载模式，直接发送视频文件到 Telegram
 - 🎯 默认最高清，自动选择最高码率
 - 🔗 上传后附带多清晰度链接
@@ -94,7 +97,7 @@ docker compose up -d
 | `/mode` | 查看/切换下载或链接模式 |
 | `/quality high\|medium\|low` | 视频画质偏好 |
 
-发送 Twitter/X 链接（`x.com/xxx/status/123` 或 `twitter.com/xxx/status/123`），机器人自动下载最高清视频并发送。
+发送 Twitter/X 链接（`x.com/xxx/status/123` 或 `twitter.com/xxx/status/123`），机器人自动下载最高清视频并发送。直播回放发送 `x.com/i/broadcasts/xxx` 即可。多条链接可一次性发送，会并发处理。
 
 ## 目录结构
 
@@ -114,6 +117,8 @@ docker compose up -d
 | `POLLING` | 轮询模式 | `true` |
 | `PORT` | 服务端口 | `3000` |
 | `CLEANUP_VIDEOS` | 上传成功后删除本地视频 | `true` |
+| `DOWNLOAD_CONCURRENCY` | 多链接并发下载上限 | `3` |
+| `BROADCAST_RESOLVER_URL` | 直播回放第三方解析兜底接口（`{url}` 占位，可选） | — |
 | `TELEGRAM_API_ID` | 本地 API ID（可选） | — |
 | `TELEGRAM_API_HASH` | 本地 API Hash（可选） | — |
 | `TELEGRAM_API_URL` | API 地址 | `https://api.telegram.org` |

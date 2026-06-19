@@ -1,9 +1,10 @@
 // X Downloader Bot for Telegram — Docker 部署版
 // 使用 fxtwitter 和 vxtwitter API 提取视频和图片
 
-import { writeFile, mkdir, rm } from 'node:fs/promises';
+import { writeFile, readFile, mkdir, rm, stat } from 'node:fs/promises';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { spawn } from 'node:child_process';
 import { getUserMode, setUserMode, getUserQuality, setUserQuality } from './store.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -28,7 +29,8 @@ function getMaxVideoSize() {
 function formatFileSize(bytes) {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
 }
 
 // ==================== 状态页 ====================
@@ -73,6 +75,7 @@ export async function handleTelegramWebhook(update) {
     if (update.message && update.message.text) {
       const chatId = update.message.chat.id;
       const messageText = update.message.text;
+      const replyToMessageId = update.message.message_id;
 
       console.log(`Message from ${chatId}: ${messageText}`);
 
@@ -108,19 +111,30 @@ export async function handleTelegramWebhook(update) {
         return;
       }
 
+      // 检查是否包含直播回放链接（x.com/i/broadcasts/ID）— 需 yt-dlp/ffmpeg 合并 HLS
+      const broadcastUrls = extractBroadcastUrls(messageText);
+      if (broadcastUrls.length > 0) {
+        console.log('Found broadcast URLs:', broadcastUrls);
+        processBroadcastUrls(broadcastUrls, chatId, replyToMessageId).catch(error => {
+          console.error('Error in broadcast processing:', error);
+          sendMessage(chatId, `❌ 直播回放处理出错: ${error.message}`, replyToMessageId).catch(() => {});
+        });
+        return;
+      }
+
       // 检查是否包含视频直链（如 video.twimg.com/xxx.mp4）
       const directUrls = extractDirectVideoUrls(messageText);
       if (directUrls.length > 0) {
         console.log('Found direct video URLs:', directUrls);
         const mode = await getUserMode(chatId);
         if (mode === 'download') {
-          const statusMsgId = await sendMessage(chatId, '🔍 检测到视频直链，正在下载...');
-          processDirectVideoUrls(directUrls, chatId, statusMsgId).catch(error => {
+          const statusMsgId = await sendMessage(chatId, '🔍 检测到视频直链，正在下载...', replyToMessageId);
+          processDirectVideoUrls(directUrls, chatId, statusMsgId, replyToMessageId).catch(error => {
             console.error('Error processing direct URLs:', error);
-            sendMessage(chatId, `❌ 处理出错: ${error.message}`).catch(() => {});
+            sendMessage(chatId, `❌ 处理出错: ${error.message}`, replyToMessageId).catch(() => {});
           });
         } else {
-          await sendMessage(chatId, '🔗 检测到视频直链：\n' + directUrls.join('\n'));
+          await sendMessage(chatId, '🔗 检测到视频直链：\n' + directUrls.join('\n'), replyToMessageId);
         }
         return;
       }
@@ -136,18 +150,15 @@ export async function handleTelegramWebhook(update) {
         console.log(`User mode: ${mode}`);
 
         if (mode === 'download') {
-          // 下载模式：异步处理
-          const statusMsgId = await sendMessage(chatId, '🔍 检测到 Twitter/X 链接，正在分析...');
-
+          // 下载模式：每个链接独立状态消息 + 并发处理（见 processUrlsDownload），立即返回保证回复迅速
           const urlsCopy = [...twitterUrls];
-          // Docker 环境不需要 ctx.waitUntil，直接异步处理
-          processUrlsDownload(urlsCopy, chatId, statusMsgId).catch(error => {
+          processUrlsDownload(urlsCopy, chatId, replyToMessageId).catch(error => {
             console.error('Error in download processing:', error);
-            sendMessage(chatId, `❌ 处理过程中出错: ${error.message}`).catch(() => {});
+            sendMessage(chatId, `❌ 处理过程中出错: ${error.message}`, replyToMessageId).catch(() => {});
           });
         } else {
           // 链接模式：同步处理（现有逻辑）
-          await sendMessage(chatId, '🔍 检测到 Twitter/X 链接，正在处理...');
+          await sendMessage(chatId, '🔍 检测到 Twitter/X 链接，正在处理...', replyToMessageId);
 
           for (const twitterUrl of twitterUrls) {
             await processTwitterUrl(twitterUrl, chatId);
@@ -159,8 +170,10 @@ export async function handleTelegramWebhook(update) {
           '❌ 未检测到有效链接。\n\n' +
           '支持的格式：\n' +
           '• Twitter/X 链接：x.com/用户/status/123\n' +
+          '• 直播回放：x.com/i/broadcasts/xxx\n' +
           '• 视频直链：video.twimg.com/xxx.mp4\n\n' +
-          '💡 默认 📥下载+🎯最高清模式'
+          '💡 默认 📥下载+🎯最高清模式',
+          replyToMessageId
         );
       }
     }
@@ -173,6 +186,12 @@ export async function handleTelegramWebhook(update) {
 function extractTwitterUrls(text) {
   const twitterRegex = /https?:\/\/(twitter\.com|x\.com)\/\w+\/status\/\d+/g;
   return text.match(twitterRegex) || [];
+}
+
+// 匹配直播回放链接：x.com/i/broadcasts/ID
+export function extractBroadcastUrls(text) {
+  const broadcastRegex = /https?:\/\/(?:twitter\.com|x\.com)\/i\/broadcasts\/[A-Za-z0-9]+/g;
+  return [...new Set(text.match(broadcastRegex) || [])];
 }
 
 // 从 URL 中提取分辨率（如 .../1280x720/...）
@@ -202,7 +221,7 @@ function extractDirectVideoUrls(text) {
 }
 
 // 处理视频直链：直接下载上传，跳过 API 解析
-async function processDirectVideoUrls(urls, chatId, statusMsgId) {
+async function processDirectVideoUrls(urls, chatId, statusMsgId, replyToMessageId) {
   const MAX_SIZE = getMaxVideoSize();
 
   for (let i = 0; i < urls.length; i++) {
@@ -230,13 +249,13 @@ async function processDirectVideoUrls(urls, chatId, statusMsgId) {
 
       let videoSent = await uploadVideoFile(
         chatId, file.buffer, file.contentType,
-        `🎬 视频直链${label}${dimInfo}`, null, dw, dh
+        `🎬 视频直链${label}${dimInfo}`, null, dw, dh, replyToMessageId
       );
 
       if (!videoSent) {
         videoSent = await uploadDocumentFile(
           chatId, file.buffer, filename, file.contentType,
-          `🎬 视频直链${label}`
+          `🎬 视频直链${label}`, replyToMessageId
         );
       }
 
@@ -245,11 +264,11 @@ async function processDirectVideoUrls(urls, chatId, statusMsgId) {
       }
 
       if (!videoSent) {
-        await sendMessage(chatId, `⚠️ 上传失败，直链：${url}`);
+        await sendMessage(chatId, `⚠️ 上传失败，直链：${url}`, replyToMessageId);
       }
     } catch (err) {
       console.error('Direct video download failed:', err.message);
-      await sendMessage(chatId, `❌ 下载失败: ${err.message}\n直链：${url}`);
+      await sendMessage(chatId, `❌ 下载失败: ${err.message}\n直链：${url}`, replyToMessageId);
     }
   }
 
@@ -553,11 +572,11 @@ async function sendMediaResponse(chatId, mediaData) {
 
     if (mediaData.type === 'text') {
       // 情况1: 既没有图片也没有视频，直接返回帖文
-      await sendMessage(chatId, baseText);
+      await sendMessage(chatId, baseText, replyToMessageId);
 
     } else if (mediaData.type === 'photos') {
       // 情况2: 只有图片，先返回帖文，再分别发送图片
-      await sendMessage(chatId, baseText);
+      await sendMessage(chatId, baseText, replyToMessageId);
 
       // 发送所有图片
       for (let i = 0; i < mediaData.photos.length; i++) {
@@ -687,7 +706,7 @@ async function sendMediaResponse(chatId, mediaData) {
   }
 }
 
-async function sendPhoto(chatId, photoUrl, caption) {
+async function sendPhoto(chatId, photoUrl, caption, replyToMessageId) {
   try {
     const botToken = getBotToken();
     if (!botToken) {
@@ -708,7 +727,8 @@ async function sendPhoto(chatId, photoUrl, caption) {
         chat_id: chatId,
         photo: photoUrl,
         caption: caption,
-        parse_mode: 'HTML'
+        parse_mode: 'HTML',
+        ...(replyToMessageId ? { reply_to_message_id: replyToMessageId, allow_sending_without_reply: true } : {})
       })
     });
 
@@ -717,7 +737,7 @@ async function sendPhoto(chatId, photoUrl, caption) {
       console.error('Telegram sendPhoto API error:', response.status, errorText);
       // 如果发送图片失败，回退到发送文本
       console.log('Falling back to text message');
-      return await sendMessage(chatId, caption);
+      return await sendMessage(chatId, caption, replyToMessageId);
     }
 
     console.log('Photo sent successfully');
@@ -726,11 +746,11 @@ async function sendPhoto(chatId, photoUrl, caption) {
   } catch (error) {
     console.error('Error sending photo:', error);
     // 如果发送图片失败，回退到发送文本
-    return await sendMessage(chatId, caption);
+    return await sendMessage(chatId, caption, replyToMessageId);
   }
 }
 
-async function sendMessage(chatId, text) {
+async function sendMessage(chatId, text, replyToMessageId) {
   try {
     const botToken = getBotToken();
     if (!botToken) {
@@ -750,7 +770,8 @@ async function sendMessage(chatId, text) {
       body: JSON.stringify({
         chat_id: chatId,
         text: text,
-        parse_mode: 'HTML'
+        parse_mode: 'HTML',
+        ...(replyToMessageId ? { reply_to_message_id: replyToMessageId, allow_sending_without_reply: true } : {})
       })
     });
 
@@ -826,30 +847,158 @@ async function handleQualityCommand(chatId, messageText) {
 
 // ==================== 下载模式核心 ====================
 
-async function processUrlsDownload(twitterUrls, chatId, statusMessageId) {
-  let currentStatusId = statusMessageId;
-
-  for (let i = 0; i < twitterUrls.length; i++) {
-    const twitterUrl = twitterUrls[i];
-
-    if (twitterUrls.length > 1) {
-      currentStatusId = await updateStatusMessage(
-        chatId, currentStatusId,
-        `🔍 处理第 ${i + 1}/${twitterUrls.length} 个链接...`
-      );
+// 简单并发上限执行器（无依赖）：最多 limit 个 worker 同时跑，全部完成后返回
+export async function runWithLimit(items, limit, worker) {
+  const queue = items.map((item, i) => ({ item, i }));
+  const runners = Array.from({ length: Math.min(limit, queue.length) }, async () => {
+    while (queue.length) {
+      const { item, i } = queue.shift();
+      try { await worker(item, i); } catch (e) { console.error('Task failed:', e); }
     }
+  });
+  await Promise.all(runners);
+}
 
-    await processTwitterUrlDownload(twitterUrl, chatId, currentStatusId);
+async function processUrlsDownload(twitterUrls, chatId, replyToMessageId) {
+  const limit = parseInt(process.env.DOWNLOAD_CONCURRENCY) || 3;
+
+  // 立即为每个链接各发一条独立状态消息（引用原始消息）——保证回复迅速且能对应到具体链接
+  const tasks = await Promise.all(twitterUrls.map(async (url) => {
+    const statusId = await sendMessage(chatId, `🔍 排队中：${url}`, replyToMessageId);
+    return { url, statusId };
+  }));
+
+  // ponytail: downloadFile 把整文件读进内存，并发×2GB 会爆内存，故设上限；要再省内存就改成下载落盘后从磁盘上传
+  await runWithLimit(tasks, limit, ({ url, statusId }) =>
+    processTwitterUrlDownload(url, chatId, statusId, replyToMessageId));
+}
+
+// ==================== 直播回放（broadcasts）====================
+
+// 用 yt-dlp 下载直播回放到本地 mp4（自带 X broadcast extractor，调 ffmpeg 合并 HLS 切片）
+function downloadBroadcastWithYtDlp(broadcastUrl, outPath, maxSizeBytes) {
+  return new Promise((resolve, reject) => {
+    const args = [
+      broadcastUrl,
+      '-o', outPath,
+      '--no-playlist',
+      '--no-warnings',
+      '--no-part',
+      '--merge-output-format', 'mp4',
+      '--max-filesize', String(maxSizeBytes)
+    ];
+    const proc = spawn('yt-dlp', args, { windowsHide: true });
+    let stderr = '';
+    proc.stderr.on('data', d => { stderr += d.toString(); });
+    proc.on('error', err => reject(new Error(`yt-dlp 不可用: ${err.message}`)));
+    // 直播回放可能很长，给 30 分钟超时
+    const timer = setTimeout(() => { proc.kill('SIGKILL'); reject(new Error('yt-dlp 超时')); }, 30 * 60 * 1000);
+    proc.on('close', code => {
+      clearTimeout(timer);
+      if (code === 0) resolve();
+      else reject(new Error(`yt-dlp 退出码 ${code}: ${stderr.slice(-300)}`));
+    });
+  });
+}
+
+// 兜底：可选第三方解析。设置 BROADCAST_RESOLVER_URL（含 {url} 占位）即启用，
+// 期望返回的文本/JSON 中包含直链 mp4。未配置或失败则返回 null（降级为手动提示）。
+async function resolveBroadcastViaThirdParty(broadcastUrl) {
+  const tpl = process.env.BROADCAST_RESOLVER_URL;
+  if (!tpl) return null;
+  try {
+    const api = tpl.replace('{url}', encodeURIComponent(broadcastUrl));
+    const res = await fetch(api, {
+      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' },
+      signal: AbortSignal.timeout(30000)
+    });
+    if (!res.ok) return null;
+    const text = await res.text();
+    // downloadFile 只能处理直链 mp4，HLS(m3u8) 留给 yt-dlp，所以只抓 mp4
+    const m = text.match(/https?:\/\/[^\s"'<>\\]+\.mp4[^\s"'<>\\]*/i);
+    return m ? m[0].replace(/\\u002[fF]/g, '/') : null;
+  } catch (e) {
+    console.error('Third-party broadcast resolver failed:', e.message);
+    return null;
   }
 }
 
-async function processTwitterUrlDownload(originalUrl, chatId, statusMessageId) {
+async function processBroadcastUrls(urls, chatId, replyToMessageId) {
+  const limit = parseInt(process.env.DOWNLOAD_CONCURRENCY) || 3;
+  const tasks = await Promise.all(urls.map(async (url) => {
+    const statusId = await sendMessage(chatId, `🔴 排队中（直播回放）：${url}`, replyToMessageId);
+    return { url, statusId };
+  }));
+  await runWithLimit(tasks, limit, ({ url, statusId }) =>
+    processBroadcastUrl(url, chatId, statusId, replyToMessageId));
+}
+
+async function processBroadcastUrl(broadcastUrl, chatId, statusMessageId, replyToMessageId) {
+  const MAX_SIZE = getMaxVideoSize();
+  const SIZE_LABEL = MAX_SIZE > 100 * 1024 * 1024 ? '2GB' : '50MB';
+  const bid = (broadcastUrl.match(/broadcasts\/([A-Za-z0-9]+)/) || [])[1] || `bc_${Date.now()}`;
+  const caption = `🎬 直播回放\n🔗 源链接: ${broadcastUrl}`;
+
+  // 主路径：yt-dlp（+ffmpeg）
+  await updateStatusMessage(chatId, statusMessageId, `🔴 解析直播回放 ${bid}（yt-dlp）...`);
+  const outPath = join(DOWNLOADS_DIR, `broadcast_${bid}_${Date.now()}.mp4`);
+  try {
+    await mkdir(DOWNLOADS_DIR, { recursive: true });
+    await downloadBroadcastWithYtDlp(broadcastUrl, outPath, MAX_SIZE);
+    const st = await stat(outPath);
+    if (st.size > MAX_SIZE) {
+      await sendMessage(chatId, `⚠️ 直播回放过大（${formatFileSize(st.size)} > ${SIZE_LABEL}），无法上传`, replyToMessageId);
+      await cleanupFile(outPath);
+      await updateStatusMessage(chatId, statusMessageId, '✅ 处理完成！');
+      return;
+    }
+    await updateStatusMessage(chatId, statusMessageId, `📤 上传直播回放（${formatFileSize(st.size)}）...`);
+    const buffer = await readFile(outPath);
+    let sent = await uploadVideoFile(chatId, buffer, 'video/mp4', caption, null, null, null, replyToMessageId);
+    if (!sent) sent = await uploadDocumentFile(chatId, buffer, `${bid}.mp4`, 'video/mp4', caption, replyToMessageId);
+    if (sent && CLEANUP_VIDEOS) await cleanupFile(outPath);
+    if (sent) {
+      await updateStatusMessage(chatId, statusMessageId, '✅ 处理完成！');
+      return;
+    }
+  } catch (err) {
+    console.error('yt-dlp broadcast failed:', err.message);
+    await cleanupFile(outPath).catch(() => {});
+  }
+
+  // 兜底：第三方解析直链 mp4
+  await updateStatusMessage(chatId, statusMessageId, '🔁 yt-dlp 未成功，尝试第三方解析...');
+  const directUrl = await resolveBroadcastViaThirdParty(broadcastUrl);
+  if (directUrl) {
+    try {
+      const file = await downloadFile(directUrl, MAX_SIZE);
+      await updateStatusMessage(chatId, statusMessageId, `📤 上传直播回放（${formatFileSize(file.size)}）...`);
+      let sent = await uploadVideoFile(chatId, file.buffer, file.contentType, caption, null, null, null, replyToMessageId);
+      if (!sent) sent = await uploadDocumentFile(chatId, file.buffer, `${bid}.mp4`, file.contentType, caption, replyToMessageId);
+      if (sent) {
+        await updateStatusMessage(chatId, statusMessageId, '✅ 处理完成！');
+        return;
+      }
+    } catch (e) {
+      console.error('Third-party broadcast download failed:', e.message);
+    }
+  }
+
+  // 全部失败：给手动提示（始终有用、不崩）
+  await sendMessage(chatId,
+    `❌ 暂时无法自动解析该直播回放。\n🔗 ${broadcastUrl}\n\n可用以下站点手动解析后把直链发给我：\n• https://www.kedou.life/extract/twitter\n• https://save.tube`,
+    replyToMessageId);
+  await updateStatusMessage(chatId, statusMessageId, '✅ 处理完成（见提示）');
+}
+
+
+async function processTwitterUrlDownload(originalUrl, chatId, statusMessageId, replyToMessageId) {
   try {
     console.log('Processing URL (download mode):', originalUrl);
 
     const urlMatch = originalUrl.match(/https?:\/\/(?:twitter\.com|x\.com)\/(\w+)\/status\/(\d+)/);
     if (!urlMatch) {
-      await sendMessage(chatId, '❌ 无法解析 Twitter/X 链接');
+      await sendMessage(chatId, '❌ 无法解析 Twitter/X 链接', replyToMessageId);
       return;
     }
 
@@ -868,7 +1017,7 @@ async function processTwitterUrlDownload(originalUrl, chatId, statusMessageId) {
     }
 
     if (!mediaData) {
-      await sendMessage(chatId, '❌ 未找到媒体内容或获取失败\n\n可能原因：\n• 推文不包含视频或图片\n• 推文已被删除\n• API 暂时不可用');
+      await sendMessage(chatId, '❌ 未找到媒体内容或获取失败\n\n可能原因：\n• 推文不包含视频或图片\n• 推文已被删除\n• API 暂时不可用', replyToMessageId);
       return;
     }
 
@@ -885,7 +1034,7 @@ async function processTwitterUrlDownload(originalUrl, chatId, statusMessageId) {
       `${mediaData.text && mediaData.text.length > 200 ? '...' : ''}`;
 
     if (mediaData.type === 'text') {
-      await sendMessage(chatId, baseText);
+      await sendMessage(chatId, baseText, replyToMessageId);
       return;
     }
 
@@ -893,7 +1042,7 @@ async function processTwitterUrlDownload(originalUrl, chatId, statusMessageId) {
 
     // 混合内容：先单独发送推文文本
     if (isMixed) {
-      await sendMessage(chatId, baseText);
+      await sendMessage(chatId, baseText, replyToMessageId);
     }
 
     // 处理图片
@@ -913,7 +1062,7 @@ async function processTwitterUrlDownload(originalUrl, chatId, statusMessageId) {
 
         await sendChatAction(chatId, 'upload_photo');
 
-        const sent = await sendPhoto(chatId, photo.url, caption);
+        const sent = await sendPhoto(chatId, photo.url, caption, replyToMessageId);
         if (!sent) {
           await updateStatusMessage(chatId, statusMessageId,
             `📥 下载图片 ${i + 1}/${mediaData.photos.length}...`);
@@ -922,7 +1071,7 @@ async function processTwitterUrlDownload(originalUrl, chatId, statusMessageId) {
             await uploadPhotoFile(chatId, file.buffer, file.contentType, caption);
           } catch (downloadErr) {
             console.error('Photo download failed:', downloadErr);
-            await sendMessage(chatId, caption);
+            await sendMessage(chatId, caption, replyToMessageId);
           }
         }
       }
@@ -945,13 +1094,14 @@ async function processTwitterUrlDownload(originalUrl, chatId, statusMessageId) {
 
         const videoCaption = `🎬 视频 ${i + 1}/${mediaData.videos.length}\n` +
           `📐 质量: ${video.quality || '未知'}\n` +
-          `⏱️ 时长: ${video.duration || '未知'}` +
+          `⏱️ 时长: ${video.duration || '未知'}\n` +
+          `🔗 源链接: ${originalUrl}` +
           `${(mediaData.videos.length === 1 && !isMixed) ? '\n\n' + baseText : ''}`;
 
         await sendChatAction(chatId, 'upload_video');
 
-        // 选择最佳 video variant（含预估算过滤）
-        const selected = selectVideoVariant(video, qualityPreference, MAX_VIDEO_SIZE);
+        // 选择最佳 video variant（HEAD 取真实大小）
+        const selected = await selectVideoVariant(video, qualityPreference, MAX_VIDEO_SIZE);
 
         if (selected.url && !selected.reason) {
           const urlsToTry = [selected.url, ...(selected.fallbacks || [])];
@@ -961,13 +1111,13 @@ async function processTwitterUrlDownload(originalUrl, chatId, statusMessageId) {
           for (const tryUrl of urlsToTry) {
             triedUrl = tryUrl;
             const tryInfo = tryUrl === selected.url && selected.estimatedSize
-              ? ` (约 ${formatFileSize(selected.estimatedSize)})`
+              ? ` (${selected.sizeAccurate ? '' : '约 '}${formatFileSize(selected.estimatedSize)})`
               : '';
 
             // 策略1: URL 直传
             await updateStatusMessage(chatId, statusMessageId,
               `📤 上传视频 ${i + 1}/${mediaData.videos.length}${tryInfo}...`);
-            videoSent = await sendVideoByUrl(chatId, tryUrl, videoCaption, vidW, vidH);
+            videoSent = await sendVideoByUrl(chatId, tryUrl, videoCaption, vidW, vidH, replyToMessageId);
             if (videoSent) break;
 
             // 策略2: 下载后上传
@@ -985,7 +1135,7 @@ async function processTwitterUrlDownload(originalUrl, chatId, statusMessageId) {
                 `📤 上传视频 ${i + 1}/${mediaData.videos.length} ` +
                 `(${formatFileSize(file.size)})...`);
               videoSent = await uploadVideoFile(
-                chatId, file.buffer, file.contentType, videoCaption, video.thumbnailUrl, vidW, vidH
+                chatId, file.buffer, file.contentType, videoCaption, video.thumbnailUrl, vidW, vidH, replyToMessageId
               );
 
               if (videoSent) {
@@ -998,7 +1148,7 @@ async function processTwitterUrlDownload(originalUrl, chatId, statusMessageId) {
 
               // 策略3: 作为文档上传
               videoSent = await uploadDocumentFile(
-                chatId, file.buffer, 'video.mp4', file.contentType, videoCaption
+                chatId, file.buffer, 'video.mp4', file.contentType, videoCaption, replyToMessageId
               );
               if (videoSent && CLEANUP_VIDEOS && savedPath) {
                 await cleanupFile(savedPath);
@@ -1011,26 +1161,26 @@ async function processTwitterUrlDownload(originalUrl, chatId, statusMessageId) {
 
           if (!videoSent) {
             // 所有尝试都失败，发送链接
-            await sendVideoLinks(chatId, video, i, mediaData.videos.length);
+            await sendVideoLinks(chatId, video, i, mediaData.videos.length, replyToMessageId);
           } else if (video.variants && video.variants.length > 1) {
             // 上传成功，附带多清晰度链接
-            await sendVideoLinks(chatId, video, i, mediaData.videos.length);
+            await sendVideoLinks(chatId, video, i, mediaData.videos.length, replyToMessageId);
           }
         } else if (selected.reason === 'all_too_large') {
           await sendMessage(chatId,
-            `⚠️ 视频文件过大（预估最小 ${formatFileSize(selected.minEstimatedSize)}，限制 ${SIZE_LABEL}）\n\n` +
-            '正在发送链接，你可以在浏览器中下载...');
-          await sendVideoLinks(chatId, video, i, mediaData.videos.length);
+            `⚠️ 视频文件过大（最小 ${formatFileSize(selected.minEstimatedSize)}，限制 ${SIZE_LABEL}）\n\n` +
+            '正在发送链接，你可以在浏览器中下载...', replyToMessageId);
+          await sendVideoLinks(chatId, video, i, mediaData.videos.length, replyToMessageId);
         } else {
           await sendMessage(chatId,
-            '⚠️ 无法获取可用的视频下载链接\n\n正在发送链接...');
-          await sendVideoLinks(chatId, video, i, mediaData.videos.length);
+            '⚠️ 无法获取可用的视频下载链接\n\n正在发送链接...', replyToMessageId);
+          await sendVideoLinks(chatId, video, i, mediaData.videos.length, replyToMessageId);
         }
 
         // 多视频时发送缩略图预览
         if (video.thumbnailUrl && mediaData.videos.length > 1) {
           await sendPhoto(chatId, video.thumbnailUrl,
-            `📸 视频 ${i + 1}/${mediaData.videos.length} 封面`);
+            `📸 视频 ${i + 1}/${mediaData.videos.length} 封面`, replyToMessageId);
         }
       }
     }
@@ -1045,7 +1195,26 @@ async function processTwitterUrlDownload(originalUrl, chatId, statusMessageId) {
 
 // ==================== 视频 Variant 选择 ====================
 
-function selectVideoVariant(video, qualityPreference, maxSizeBytes) {
+// HEAD 请求获取远程文件真实大小（Content-Length），失败返回 null
+async function getRemoteFileSize(url) {
+  try {
+    const res = await fetch(url, {
+      method: 'HEAD',
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+      },
+      signal: AbortSignal.timeout(15000)
+    });
+    if (!res.ok) return null;
+    const len = res.headers.get('Content-Length');
+    return len ? parseInt(len) : null;
+  } catch {
+    return null;
+  }
+}
+
+// 选择视频 variant：bitrate 估算做免费排序，再对候选发 HEAD 拿真实大小（更准的展示与超限判断）
+export async function selectVideoVariant(video, qualityPreference, maxSizeBytes) {
   let candidates = [];
 
   if (video.variants && video.variants.length > 0) {
@@ -1054,40 +1223,18 @@ function selectVideoVariant(video, qualityPreference, maxSizeBytes) {
 
     candidates = video.variants
       .filter(v => v.bitrate && v.bitrate > 0)
-      .map(v => {
-        // 预估文件大小: bitrate(bps) × duration(s) ÷ 8 = bytes
-        // 加 15% 的容器/元数据开销
-        const estimatedSize = durationSeconds > 0
+      .map(v => ({
+        url: v.url,
+        bitrate: v.bitrate || 0,
+        // 粗估仅用于排序/兜底：bitrate(bps) × duration(s) ÷ 8，加 15% 容器开销
+        estimatedSize: durationSeconds > 0
           ? Math.ceil((v.bitrate * durationSeconds) / 8 * 1.15)
-          : null;
-
-        return {
-          url: v.url,
-          bitrate: v.bitrate || 0,
-          estimatedSize
-        };
-      });
-
-    // 高画质：取最高码率，不预过滤（由下载层实际检测大小）
-    // 中/低画质：预过滤掉明显超限的 variant
-    if (qualityPreference !== 'high') {
-      const fittingCandidates = candidates.filter(c => {
-        if (c.estimatedSize === null) return true;
-        return c.estimatedSize <= maxSizeBytes;
-      });
-
-      if (candidates.length > 0 && fittingCandidates.length === 0) {
-        const minEstimated = Math.min(...candidates.map(c => c.estimatedSize || Infinity));
-        console.log(`All variants estimated too large. Min estimated: ${formatFileSize(minEstimated)}, max allowed: ${formatFileSize(maxSizeBytes)}`);
-        return { url: null, reason: 'all_too_large', minEstimatedSize: minEstimated };
-      }
-
-      candidates = fittingCandidates.length > 0 ? fittingCandidates : candidates;
-    }
-
+          : null
+      }));
   } else if (video.url) {
-    // vxtwitter 单一 URL，无法预估大小
-    return { url: video.url, reason: null };
+    // vxtwitter 单一 URL：HEAD 拿真实大小展示
+    const realSize = await getRemoteFileSize(video.url);
+    return { url: video.url, reason: null, estimatedSize: realSize, sizeAccurate: realSize != null };
   } else {
     return { url: null, reason: 'no_variants' };
   }
@@ -1096,33 +1243,46 @@ function selectVideoVariant(video, qualityPreference, maxSizeBytes) {
     return { url: null, reason: 'no_variants' };
   }
 
-  // 根据画质偏好选择索引
-  let selectedIndex;
+  // 按画质偏好决定尝试顺序（高=最高码率优先，低=最低优先，中=中档起逐级降）
+  let order;
   switch (qualityPreference) {
-    case 'high':
-      selectedIndex = 0;
-      break;
-    case 'medium':
-      selectedIndex = Math.floor(candidates.length / 2);
-      break;
     case 'low':
-      selectedIndex = candidates.length - 1;
+      order = [...candidates].reverse();
       break;
+    case 'medium': {
+      const mid = Math.floor(candidates.length / 2);
+      order = [...candidates.slice(mid), ...candidates.slice(0, mid).reverse()];
+      break;
+    }
+    case 'high':
     default:
-      selectedIndex = 0;
+      order = candidates;
   }
 
-  const selected = candidates[selectedIndex] || candidates[0];
-  return {
-    url: selected.url,
-    reason: null,
-    estimatedSize: selected.estimatedSize,
-    availableCount: candidates.length,
-    // 高画质模式：如果首选失败，提供其他 variant 供回退
-    fallbacks: qualityPreference === 'high'
-      ? candidates.slice(1).map(c => c.url)
-      : []
-  };
+  // 逐个 HEAD 取真实大小，选第一个不超限的（HEAD 次数通常 1~3）
+  let minSeen = Infinity;
+  for (const c of order) {
+    const realSize = await getRemoteFileSize(c.url);
+    const size = realSize != null ? realSize : c.estimatedSize;
+    if (size != null && size < minSeen) minSeen = size;
+    if (size == null || size <= maxSizeBytes) {
+      return {
+        url: c.url,
+        reason: null,
+        estimatedSize: size,
+        sizeAccurate: realSize != null,
+        availableCount: candidates.length,
+        // 高画质：保留其余 variant 作为上传失败时的回退
+        fallbacks: qualityPreference === 'high'
+          ? order.filter(x => x.url !== c.url).map(x => x.url)
+          : []
+      };
+    }
+  }
+
+  // 全部超限：报告最小的那个真实大小
+  const minEstimated = Math.min(...order.map(c => c.estimatedSize || Infinity));
+  return { url: null, reason: 'all_too_large', minEstimatedSize: Number.isFinite(minSeen) ? minSeen : minEstimated };
 }
 
 // ==================== 文件下载 ====================
@@ -1225,7 +1385,7 @@ async function cleanupFile(filepath) {
 
 // ==================== 文件上传 (Telegram) ====================
 
-async function uploadVideoFile(chatId, buffer, contentType, caption, thumbnailUrl, width, height) {
+async function uploadVideoFile(chatId, buffer, contentType, caption, thumbnailUrl, width, height, replyToMessageId) {
   try {
     const botToken = getBotToken();
     if (!botToken) return false;
@@ -1238,6 +1398,10 @@ async function uploadVideoFile(chatId, buffer, contentType, caption, thumbnailUr
     if (width) formData.append('width', String(width));
     if (height) formData.append('height', String(height));
     formData.append('supports_streaming', 'true');
+    if (replyToMessageId) {
+      formData.append('reply_to_message_id', String(replyToMessageId));
+      formData.append('allow_sending_without_reply', 'true');
+    }
 
     console.log(`Uploading video: ${formatFileSize(buffer.byteLength)} ${width ? `${width}x${height}` : ''}`);
 
@@ -1295,7 +1459,7 @@ async function uploadPhotoFile(chatId, buffer, contentType, caption) {
   }
 }
 
-async function uploadDocumentFile(chatId, buffer, filename, contentType, caption) {
+async function uploadDocumentFile(chatId, buffer, filename, contentType, caption, replyToMessageId) {
   try {
     const botToken = getBotToken();
     if (!botToken) return false;
@@ -1304,6 +1468,10 @@ async function uploadDocumentFile(chatId, buffer, filename, contentType, caption
     formData.append('chat_id', chatId.toString());
     formData.append('document', new Blob([buffer], { type: contentType }), filename);
     if (caption) formData.append('caption', caption);
+    if (replyToMessageId) {
+      formData.append('reply_to_message_id', String(replyToMessageId));
+      formData.append('allow_sending_without_reply', 'true');
+    }
 
     console.log(`Uploading document: ${formatFileSize(buffer.byteLength)}`);
 
@@ -1328,7 +1496,7 @@ async function uploadDocumentFile(chatId, buffer, filename, contentType, caption
   }
 }
 
-async function sendVideoByUrl(chatId, videoUrl, caption, width, height) {
+async function sendVideoByUrl(chatId, videoUrl, caption, width, height, replyToMessageId) {
   try {
     const botToken = getBotToken();
     if (!botToken) return false;
@@ -1342,6 +1510,7 @@ async function sendVideoByUrl(chatId, videoUrl, caption, width, height) {
       supports_streaming: true
     };
     if (width) { body.width = width; body.height = height; }
+    if (replyToMessageId) { body.reply_to_message_id = replyToMessageId; body.allow_sending_without_reply = true; }
 
     const response = await fetch(`${getTelegramApiUrl()}/bot${botToken}/sendVideo`, {
       method: 'POST',
@@ -1365,7 +1534,7 @@ async function sendVideoByUrl(chatId, videoUrl, caption, width, height) {
   }
 }
 
-async function sendVideoLinks(chatId, video, index, total) {
+async function sendVideoLinks(chatId, video, index, total, replyToMessageId) {
   let caption = `🔗 视频 ${index + 1}/${total}\n` +
     `📐 质量: ${video.quality || 'N/A'}\n` +
     `⏱️ 时长: ${video.duration || '未知'}\n`;
@@ -1382,12 +1551,12 @@ async function sendVideoLinks(chatId, video, index, total) {
     caption += `\n🔗 链接: ${video.url}`;
   }
 
-  await sendMessage(chatId, caption);
+  await sendMessage(chatId, caption, replyToMessageId);
 }
 
 // ==================== 状态反馈 ====================
 
-async function updateStatusMessage(chatId, messageId, text) {
+async function updateStatusMessage(chatId, messageId, text, replyToMessageId) {
   try {
     const botToken = getBotToken();
     if (!botToken) return messageId;
@@ -1413,7 +1582,7 @@ async function updateStatusMessage(chatId, messageId, text) {
       return messageId;
     } else {
       // 发送新消息
-      return await sendMessage(chatId, text);
+      return await sendMessage(chatId, text, replyToMessageId);
     }
   } catch (error) {
     console.error('Status message error:', error);

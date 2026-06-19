@@ -1,10 +1,10 @@
 {
   "name": "x-downloader-bot",
-  "version": "1.5.1",
+  "version": "1.6.0",
   "type": "module",
-  "description": "Telegram bot for extracting Twitter/X media (videos and images) — Docker deployment",
+  "description": "Telegram bot for extracting Twitter/X media (videos, images, live broadcasts) — Docker deployment",
   "main": "src/server.js",
-  "keywords": ["telegram", "bot", "twitter", "x", "media", "video", "image", "docker"],
+  "keywords": ["telegram", "bot", "twitter", "x", "media", "video", "image", "broadcast", "docker"],
   "author": "Your Name",
   "license": "MIT",
   "repository": {
@@ -17,7 +17,8 @@
   "homepage": "https://github.com/yourusername/x-downloader-bot#readme",
   "scripts": {
     "start": "node src/server.js",
-    "dev": "node --watch src/server.js"
+    "dev": "node --watch src/server.js",
+    "test": "node test/selfcheck.mjs"
   },
   "dependencies": {
     "dotenv": "^16.4.0",
