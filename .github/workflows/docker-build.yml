@@ -5,6 +5,15 @@ on:
     branches: [master]
   workflow_dispatch:
 
+# 同一分支重复推送时取消旧构建，避免并发竞态
+concurrency:
+  group: docker-build-${{ github.ref }}
+  cancel-in-progress: true
+
+# 创建 GitHub Release 需要写权限
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -50,3 +59,16 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      # 构建成功后，为该版本创建 GitHub Release（自动附带源码 zip/tar.gz）
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="v${{ steps.version.outputs.version }}"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG 已存在，跳过"
+          else
+            gh release create "$TAG" --title "$TAG" --generate-notes
+            echo "已创建 Release $TAG"
+          fi

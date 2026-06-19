@@ -123,14 +123,16 @@ docker compose up -d
 | `TELEGRAM_API_HASH` | 本地 API Hash（可选） | — |
 | `TELEGRAM_API_URL` | API 地址 | `https://api.telegram.org` |
 
-## 镜像标签
+## 镜像标签与发行版
 
-每次推送自动构建，版本号从 `package.json` 读取，手动修改即可控制版本。
+每次推送 master 自动构建，版本号从 `package.json` 读取，手动修改即可控制版本。构建成功后还会**自动创建对应的 GitHub Release**（含源码 zip/tar.gz）。
 
 | 标签 | 说明 |
 |------|------|
 | `latest` | 最新版本 |
-| `v1.2.0` | 对应 package.json 中的版本 |
+| `v1.6.2` | 对应 package.json 中的版本 |
+
+> [Releases 页面](https://github.com/QCEnjoyLL/x-downloader-bot/releases) 与镜像版本一一对应。
 
 ## License
 
