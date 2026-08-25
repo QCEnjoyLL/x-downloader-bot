@@ -6,6 +6,7 @@ import { mkdtemp, writeFile, readFile, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
+  createProgressReporter,
   downloadFileToDisk,
   extractBroadcastUrls,
   getMaxVideoSize,
@@ -236,6 +237,20 @@ import {
     if (previous === undefined) delete process.env.TELEGRAM_API_URL;
     else process.env.TELEGRAM_API_URL = previous;
   }
+}
+
+// 8) 上传完成事件不能被节流，并能持续显示 Telegram 处理等待状态
+{
+  const messages = [];
+  const report = createProgressReporter('上传视频', '📤', text => messages.push(text), 60000);
+  report(1, 100);
+  report(50, 100); // 应被 60 秒节流
+  report(100, 100, { phase: 'processing', elapsedSeconds: 0 });
+  report(100, 100, { phase: 'processing', elapsedSeconds: 5 });
+
+  assert.equal(messages.length, 3, '完成和等待事件不应被普通进度节流');
+  assert.match(messages[1], /100%.*Telegram 处理中/, '完成传输后应显示 Telegram 处理阶段');
+  assert.match(messages[2], /已等待 5 秒/, '等待阶段应显示已等待时间');
 }
 
 console.log('✅ selfcheck passed');

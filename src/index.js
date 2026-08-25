@@ -1418,19 +1418,34 @@ export async function selectVideoVariant(video, qualityPreference, maxSizeBytes)
 
 // ==================== 文件下载 ====================
 
-// 生成节流的进度回调：每 ~4 秒把百分比刷到状态消息（emoji 区分下载/上传）
-function makeProgress(chatId, statusMessageId, label, emoji = '📥') {
+// 生成节流的进度回调。完成事件永不被节流；上传完成传输后可持续显示 Telegram 处理等待时间。
+export function createProgressReporter(label, emoji, emit, intervalMs = 4000) {
   let last = 0;
-  return (done, total) => {
+  return (done, total, meta = {}) => {
     const now = Date.now();
-    if (now - last < 4000) return;
+    const complete = Boolean(total && done >= total);
+    const processing = meta.phase === 'processing';
+    if (!complete && now - last < intervalMs) return;
     last = now;
-    const pct = total ? ` ${(done / total * 100).toFixed(0)}%` : '';
+    const displayDone = total ? Math.min(done, total) : done;
+    const percent = total
+      ? (complete ? 100 : Math.min(99, Math.floor(displayDone / total * 100)))
+      : null;
+    const pct = percent == null ? '' : ` ${percent}%`;
     const info = total
-      ? ` (${formatFileSize(done)}/${formatFileSize(total)})`
-      : ` (${formatFileSize(done)})`;
-    updateStatusMessage(chatId, statusMessageId, `${emoji} ${label}${pct}${info}...`).catch(() => {});
+      ? ` (${formatFileSize(displayDone)}/${formatFileSize(total)})`
+      : ` (${formatFileSize(displayDone)})`;
+    const waiting = processing
+      ? `，文件已传输，Telegram 处理中${meta.elapsedSeconds ? `（已等待 ${meta.elapsedSeconds} 秒）` : ''}...`
+      : '...';
+    emit(`${emoji} ${label}${pct}${info}${waiting}`);
   };
+}
+
+function makeProgress(chatId, statusMessageId, label, emoji = '📥') {
+  return createProgressReporter(label, emoji, (text) => {
+    updateStatusMessage(chatId, statusMessageId, text).catch(() => {});
+  });
 }
 
 async function downloadFile(url, maxSizeBytes, onProgress) {
@@ -1602,6 +1617,12 @@ export async function uploadMultipart(urlStr, fields, file, onProgress, timeoutM
     const headerBytes = fieldParts.reduce((s, p) => s + p.length, 0) + fileHeader.length;
     const total = headerBytes + fileSize + tail.length;
 
+    let waitingTimer = null;
+    const stopWaiting = () => {
+      if (waitingTimer) clearInterval(waitingTimer);
+      waitingTimer = null;
+    };
+
     const req = reqFn({
       hostname: u.hostname,
       port: u.port || (isHttps ? 443 : 80),
@@ -1615,10 +1636,22 @@ export async function uploadMultipart(urlStr, fields, file, onProgress, timeoutM
       let body = '';
       res.setEncoding('utf8');
       res.on('data', d => { body += d; });
-      res.on('end', () => resolve({ status: res.statusCode, body }));
+      res.on('end', () => {
+        stopWaiting();
+        resolve({ status: res.statusCode, body });
+      });
+      res.on('aborted', () => {
+        stopWaiting();
+        reject(new Error('upload response aborted'));
+      });
+      res.on('error', (error) => {
+        stopWaiting();
+        reject(error);
+      });
     });
     let fileStream = null;
     req.on('error', (error) => {
+      stopWaiting();
       if (fileStream) fileStream.destroy();
       reject(error);
     });
@@ -1634,7 +1667,14 @@ export async function uploadMultipart(urlStr, fields, file, onProgress, timeoutM
     const finish = () => {
       req.write(tail);
       sent += tail.length;
-      if (onProgress) onProgress(sent, total);
+      const waitingStartedAt = Date.now();
+      if (onProgress) {
+        onProgress(sent, total, { phase: 'processing', elapsedSeconds: 0 });
+        waitingTimer = setInterval(() => {
+          const elapsedSeconds = Math.floor((Date.now() - waitingStartedAt) / 1000);
+          onProgress(sent, total, { phase: 'processing', elapsedSeconds });
+        }, 5000);
+      }
       req.end();
     };
 

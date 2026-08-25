@@ -15,6 +15,7 @@
 - 🔗 上传后附带多清晰度链接
 - 💾 视频自动保存到本地（`./downloads` 目录）
 - 🌊 视频流式落盘并从磁盘上传，大文件不再整段载入内存
+- 📤 上传完成传输后显示 Telegram 处理状态和等待时间
 - 🔄 双重 API（fxtwitter + vxtwitter），自动回退
 - 🚀 可选本地 Bot API，上传上限 **50MB → 2GB**
 - 🐳 Docker 部署，支持 amd64 / arm64
@@ -168,7 +169,7 @@ npm start
 | 标签 | 说明 |
 |------|------|
 | `latest` | 最新版本 |
-| `v1.7.1` | 对应 package.json 中的版本 |
+| `v1.7.2` | 对应 package.json 中的版本 |
 
 > [Releases 页面](https://github.com/QCEnjoyLL/x-downloader-bot/releases) 与镜像版本一一对应。
 

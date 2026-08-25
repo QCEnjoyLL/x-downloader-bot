@@ -1,5 +1,9 @@
 # 更新日志
 
+## v1.7.2
+- 修复上传完成的 100% 状态被进度节流丢弃的问题
+- 文件传输完成后显示“Telegram 处理中”，等待期间每 5 秒更新已等待时间，避免长时间停在 1%
+
 ## v1.7.1
 - `.env` 新增 `HOST_PORT`，可直接配置 Docker Compose 暴露到宿主机的端口
 - `.env` 新增 `COMPOSE_PROFILES` 开关，设为 `local-api` 即启用本地 Telegram Bot API 容器，留空则禁用
