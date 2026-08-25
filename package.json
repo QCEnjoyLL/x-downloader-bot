@@ -1,20 +1,30 @@
 {
   "name": "x-downloader-bot",
-  "version": "1.6.6",
+  "version": "1.7.0",
   "type": "module",
   "description": "Telegram bot for extracting Twitter/X media (videos, images, live broadcasts) — Docker deployment",
   "main": "src/server.js",
-  "keywords": ["telegram", "bot", "twitter", "x", "media", "video", "image", "broadcast", "docker"],
-  "author": "Your Name",
+  "keywords": [
+    "telegram",
+    "bot",
+    "twitter",
+    "x",
+    "media",
+    "video",
+    "image",
+    "broadcast",
+    "docker"
+  ],
+  "author": "QCEnjoyLL",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/yourusername/x-downloader-bot.git"
+    "url": "git+https://github.com/QCEnjoyLL/x-downloader-bot.git"
   },
   "bugs": {
-    "url": "https://github.com/yourusername/x-downloader-bot/issues"
+    "url": "https://github.com/QCEnjoyLL/x-downloader-bot/issues"
   },
-  "homepage": "https://github.com/yourusername/x-downloader-bot#readme",
+  "homepage": "https://github.com/QCEnjoyLL/x-downloader-bot#readme",
   "scripts": {
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",

@@ -1,7 +1,7 @@
 // X Downloader Bot 用户偏好存储
 // 使用 JSON 文件持久化（替代 Cloudflare KV）
 
-import { readFile, writeFile, mkdir } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, rename } from 'node:fs/promises';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -12,13 +12,15 @@ const PREFS_FILE = join(DATA_DIR, 'prefs.json');
 // 内存缓存，避免每次读写磁盘
 let cache = null;
 let cacheLoaded = false;
+let saveQueue = Promise.resolve();
 
 async function loadCache() {
   if (cacheLoaded) return;
   try {
     await mkdir(DATA_DIR, { recursive: true });
     const raw = await readFile(PREFS_FILE, 'utf-8');
-    cache = JSON.parse(raw);
+    const parsed = JSON.parse(raw);
+    cache = parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
   } catch {
     cache = {};
   }
@@ -26,8 +28,14 @@ async function loadCache() {
 }
 
 async function saveCache() {
-  await mkdir(DATA_DIR, { recursive: true });
-  await writeFile(PREFS_FILE, JSON.stringify(cache, null, 2), 'utf-8');
+  const snapshot = JSON.stringify(cache, null, 2);
+  saveQueue = saveQueue.catch(() => {}).then(async () => {
+    await mkdir(DATA_DIR, { recursive: true });
+    const tempFile = `${PREFS_FILE}.tmp`;
+    await writeFile(tempFile, snapshot, 'utf-8');
+    await rename(tempFile, PREFS_FILE);
+  });
+  await saveQueue;
 }
 
 /**
@@ -41,7 +49,7 @@ export async function getUserPrefs(chatId) {
   return {
     mode: 'download',     // Docker 部署默认下载模式
     quality: 'high',      // 默认最高清
-    ...(cache[key] || {})
+    ...cache[key]
   };
 }
 

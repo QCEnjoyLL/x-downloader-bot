@@ -1,0 +1,9 @@
+.git
+.github
+.env
+node_modules
+data
+downloads
+telegram-api
+test
+npm-debug.log*

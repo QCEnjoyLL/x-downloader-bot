@@ -1,6 +1,7 @@
 // X Downloader Bot — Docker 部署版 Express 服务器入口
 import 'dotenv/config';
 import express from 'express';
+import { timingSafeEqual } from 'node:crypto';
 import {
   handleTelegramWebhook,
   setupWebhook,
@@ -8,12 +9,21 @@ import {
 } from './index.js';
 
 const PORT = process.env.PORT || 3000;
-const POLLING = process.env.POLLING === 'true';
+const POLLING = process.env.POLLING !== 'false';
 const BOT_TOKEN = process.env.BOT_TOKEN || '';
 const TELEGRAM_API = process.env.TELEGRAM_API_URL || 'https://api.telegram.org';
+const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || '';
+const WEBHOOK_SETUP_KEY = process.env.WEBHOOK_SETUP_KEY || '';
 
 const app = express();
-app.use(express.json());
+app.use(express.json({ limit: '1mb' }));
+
+function secretsMatch(actual, expected) {
+  if (!actual || !expected) return false;
+  const a = Buffer.from(String(actual));
+  const b = Buffer.from(String(expected));
+  return a.length === b.length && timingSafeEqual(a, b);
+}
 
 // 主页 — 状态显示
 app.get('/', async (_req, res) => {
@@ -28,17 +38,26 @@ app.get('/', async (_req, res) => {
 
 // Webhook 接收（仅非轮询模式需要）
 app.post('/webhook', async (req, res) => {
-  try {
-    await handleTelegramWebhook(req.body);
-    res.status(200).send('OK');
-  } catch (err) {
-    console.error('Webhook error:', err);
-    res.status(200).send('OK');
+  if (POLLING) return res.status(409).send('Webhook disabled in polling mode');
+  if (!WEBHOOK_SECRET) return res.status(503).send('WEBHOOK_SECRET is not configured');
+  if (!secretsMatch(req.get('X-Telegram-Bot-Api-Secret-Token'), WEBHOOK_SECRET)) {
+    return res.status(401).send('Unauthorized');
   }
+  // Telegram 需要快速收到 200；实际处理异步进行，避免耗时下载触发重复投递。
+  res.status(200).send('OK');
+  handleTelegramWebhook(req.body).catch(err => {
+    console.error('Webhook error:', err);
+  });
 });
 
 // Webhook 设置助手
 app.get('/setup-webhook', async (req, res) => {
+  if (POLLING) return res.status(409).send('Switch POLLING=false before setting a webhook');
+  if (!WEBHOOK_SECRET) return res.status(503).send('WEBHOOK_SECRET is not configured');
+  if (!WEBHOOK_SETUP_KEY) return res.status(503).send('WEBHOOK_SETUP_KEY is not configured');
+  if (!secretsMatch(req.get('X-Webhook-Setup-Key'), WEBHOOK_SETUP_KEY)) {
+    return res.status(401).send('Unauthorized');
+  }
   try {
     const html = await setupWebhook(req);
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
@@ -59,7 +78,7 @@ app.listen(PORT, () => {
     console.error('⚠️  BOT_TOKEN 未设置！请检查 .env 文件');
     process.exit(1);
   }
-  console.log(`✅ BOT_TOKEN 已配置 (${BOT_TOKEN.substring(0, 10)}...)`);
+  console.log('✅ BOT_TOKEN 已配置');
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
   console.log('  🤖 X Downloader Bot');
   console.log('  默认：📥 下载模式 + 🎯 最高清');
@@ -79,16 +98,17 @@ app.listen(PORT, () => {
 
 async function startPolling() {
   let offset = 0;
+  let retryDelay = 1000;
 
   async function poll() {
     try {
       const url = `${TELEGRAM_API}/bot${BOT_TOKEN}/getUpdates?timeout=30&offset=${offset}`;
-      const response = await fetch(url);
+      const response = await fetch(url, { signal: AbortSignal.timeout(40000) });
       const data = await response.json();
 
       if (!data.ok) {
         console.error('Polling error:', data.description);
-        return;
+        return false;
       }
 
       for (const update of data.result) {
@@ -97,22 +117,36 @@ async function startPolling() {
           console.error('Handle update error:', err);
         });
       }
+      return true;
     } catch (err) {
       console.error('Polling request failed:', err.message);
+      return false;
     }
   }
 
   // 删除已有的 webhook，切换到 getUpdates 模式
   try {
-    await fetch(`${TELEGRAM_API}/bot${BOT_TOKEN}/deleteWebhook?drop_pending_updates=true`);
-    console.log('✅ Webhook 已清除，开始轮询');
-  } catch {}
+    const response = await fetch(`${TELEGRAM_API}/bot${BOT_TOKEN}/deleteWebhook`, {
+      signal: AbortSignal.timeout(30000)
+    });
+    const result = await response.json();
+    if (result.ok) console.log('✅ Webhook 已清除，开始轮询');
+    else console.error('Webhook 清除失败:', result.description);
+  } catch (error) {
+    console.error('Webhook 清除失败:', error.message);
+  }
 
   console.log('🔄 轮询中...');
 
   // 持续轮询
   while (true) {
-    await poll();
-    // getUpdates 长连接断开后立即重连
+    const ok = await poll();
+    if (ok) {
+      retryDelay = 1000;
+      continue;
+    }
+    // Telegram/API/网络异常时指数退避，避免紧循环刷日志或触发限流。
+    await new Promise(resolve => setTimeout(resolve, retryDelay));
+    retryDelay = Math.min(retryDelay * 2, 30000);
   }
 }

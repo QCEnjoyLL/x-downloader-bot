@@ -2,9 +2,10 @@ services:
   api:
     image: aiogram/telegram-bot-api:latest
     container_name: xbot-api
+    profiles: ["local-api"]
     environment:
-      TELEGRAM_API_ID: ${TELEGRAM_API_ID}
-      TELEGRAM_API_HASH: ${TELEGRAM_API_HASH}
+      TELEGRAM_API_ID: ${TELEGRAM_API_ID:-}
+      TELEGRAM_API_HASH: ${TELEGRAM_API_HASH:-}
     volumes:
       - ./telegram-api:/var/lib/telegram-bot-api
     restart: unless-stopped
@@ -19,10 +20,15 @@ services:
       - PORT=3000
       - POLLING=${POLLING:-true}
       - CLEANUP_VIDEOS=${CLEANUP_VIDEOS:-true}
-      - TELEGRAM_API_URL=${TELEGRAM_API_URL:-http://api:8081}
+      - DOWNLOAD_CONCURRENCY=${DOWNLOAD_CONCURRENCY:-3}
+      - DEBUG_UPDATES=${DEBUG_UPDATES:-false}
+      - BROADCAST_RESOLVER_URL=${BROADCAST_RESOLVER_URL:-}
+      - ALLOW_PRIVATE_DOWNLOADS=${ALLOW_PRIVATE_DOWNLOADS:-false}
+      - TELEGRAM_API_URL=${TELEGRAM_API_URL:-https://api.telegram.org}
+      - WEBHOOK_URL=${WEBHOOK_URL:-}
+      - WEBHOOK_SECRET=${WEBHOOK_SECRET:-}
+      - WEBHOOK_SETUP_KEY=${WEBHOOK_SETUP_KEY:-}
     volumes:
       - ./data:/app/data
       - ./downloads:/app/downloads
     restart: unless-stopped
-    depends_on:
-      - api

@@ -1,8 +1,18 @@
 // 最小自测（无框架）：node test/selfcheck.mjs
-// 覆盖三处新逻辑：直播回放链接识别、并发上限执行器、按真实大小选 variant。
+// 覆盖链接识别、并发限制、画质选择、内存/磁盘上传、流式落盘和 API 上限判断。
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
-import { extractBroadcastUrls, runWithLimit, selectVideoVariant, uploadMultipart } from '../src/index.js';
+import { mkdtemp, writeFile, readFile, rm, stat } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import {
+  downloadFileToDisk,
+  extractBroadcastUrls,
+  getMaxVideoSize,
+  runWithLimit,
+  selectVideoVariant,
+  uploadMultipart
+} from '../src/index.js';
 
 // 1) extractBroadcastUrls：命中 broadcasts，不误匹配普通 status
 {
@@ -24,6 +34,11 @@ import { extractBroadcastUrls, runWithLimit, selectVideoVariant, uploadMultipart
   assert.equal(done, 10, '未全部执行');
   assert.ok(peak <= 3, `并发峰值 ${peak} 超过上限 3`);
   assert.ok(peak >= 2, `并发未生效（峰值仅 ${peak}）`);
+
+  // 非法/零并发也应安全退化为 1，而不是完全不执行。
+  let fallbackDone = 0;
+  await runWithLimit([1, 2], 0, async () => { fallbackDone++; });
+  assert.equal(fallbackDone, 2, '非法并发值不应跳过任务');
 }
 
 // 3) selectVideoVariant：用 mock HEAD 返回真实大小，按画质选对档位
@@ -34,6 +49,8 @@ import { extractBroadcastUrls, runWithLimit, selectVideoVariant, uploadMultipart
     'http://v/low.mp4': 5 * 1024 * 1024,
   };
   const realFetch = globalThis.fetch;
+  const previousPrivateDownloads = process.env.ALLOW_PRIVATE_DOWNLOADS;
+  process.env.ALLOW_PRIVATE_DOWNLOADS = 'true';
   globalThis.fetch = async (url, opts) => {
     assert.equal(opts?.method, 'HEAD', 'selectVideoVariant 应发 HEAD');
     return { ok: true, headers: { get: (k) => (k === 'Content-Length' ? String(sizes[url]) : null) } };
@@ -70,6 +87,8 @@ import { extractBroadcastUrls, runWithLimit, selectVideoVariant, uploadMultipart
     assert.equal(tooBig.minEstimatedSize, sizes['http://v/low.mp4'], '应报最小真实大小');
   } finally {
     globalThis.fetch = realFetch;
+    if (previousPrivateDownloads === undefined) delete process.env.ALLOW_PRIVATE_DOWNLOADS;
+    else process.env.ALLOW_PRIVATE_DOWNLOADS = previousPrivateDownloads;
   }
 }
 
@@ -114,6 +133,108 @@ import { extractBroadcastUrls, runWithLimit, selectVideoVariant, uploadMultipart
   assert.equal(lastP[0], lastP[1], '最终进度应等于 total');
   for (let k = 1; k < progresses.length; k++) {
     assert.ok(progresses[k][0] >= progresses[k - 1][0], '进度应单调不减');
+  }
+}
+
+// 5) uploadMultipart：支持直接从磁盘流式上传
+{
+  const dir = await mkdtemp(join(tmpdir(), 'xbot-upload-'));
+  const filePath = join(dir, 'disk.bin');
+  const fileData = Buffer.from('DISKDATA'.repeat(100000));
+  await writeFile(filePath, fileData);
+  const server = createServer();
+
+  try {
+    const received = await new Promise((resolve, reject) => {
+      server.on('request', (req, res) => {
+        let bytes = 0;
+        req.on('data', chunk => { bytes += chunk.length; });
+        req.on('end', () => {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true }));
+          resolve({ bytes, declared: Number(req.headers['content-length']) });
+        });
+      });
+      server.on('error', reject);
+      server.listen(0, '127.0.0.1', async () => {
+        try {
+          const port = server.address().port;
+          await uploadMultipart(
+            `http://127.0.0.1:${port}/`,
+            { chat_id: '123' },
+            { field: 'document', filename: 'disk.bin', contentType: 'application/octet-stream', path: filePath }
+          );
+        } catch (error) { reject(error); }
+      });
+    });
+    assert.equal(received.bytes, received.declared, '磁盘上传长度应与 Content-Length 一致');
+    assert.ok(received.bytes > fileData.length, 'multipart 应包含文件以外的边界和字段');
+  } finally {
+    await new Promise(resolve => server.close(resolve));
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
+// 6) downloadFileToDisk：流式落盘、拦截私网，并在超限时删除残留文件
+{
+  const dir = await mkdtemp(join(tmpdir(), 'xbot-download-'));
+  const output = join(dir, 'video.bin');
+  const oversized = join(dir, 'oversized.bin');
+  const payload = Buffer.from('STREAM'.repeat(50000));
+  const server = createServer((_req, res) => {
+    res.writeHead(200, {
+      'Content-Type': 'video/mp4',
+      'Content-Length': payload.length
+    });
+    res.end(payload);
+  });
+  await new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', resolve);
+  });
+  const previousPrivateDownloads = process.env.ALLOW_PRIVATE_DOWNLOADS;
+
+  try {
+    const url = `http://127.0.0.1:${server.address().port}/video`;
+    delete process.env.ALLOW_PRIVATE_DOWNLOADS;
+    await assert.rejects(
+      downloadFileToDisk(url, output, payload.length + 1),
+      /UNSAFE_URL/,
+      '默认应阻止访问本机或私网地址'
+    );
+
+    process.env.ALLOW_PRIVATE_DOWNLOADS = 'true';
+    const result = await downloadFileToDisk(url, output, payload.length + 1);
+    assert.equal(result.size, payload.length, '落盘大小错误');
+    assert.deepEqual(await readFile(output), payload, '落盘内容错误');
+
+    await assert.rejects(
+      downloadFileToDisk(url, oversized, payload.length - 1),
+      /SIZE_EXCEEDED/,
+      '超过限制时应拒绝下载'
+    );
+    await assert.rejects(stat(oversized), /ENOENT/, '超限文件不应残留在磁盘');
+  } finally {
+    if (previousPrivateDownloads === undefined) delete process.env.ALLOW_PRIVATE_DOWNLOADS;
+    else process.env.ALLOW_PRIVATE_DOWNLOADS = previousPrivateDownloads;
+    await new Promise(resolve => server.close(resolve));
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
+// 7) 官方 API 始终按 50MB，本地/自定义 API 才按 2GB
+{
+  const previous = process.env.TELEGRAM_API_URL;
+  try {
+    delete process.env.TELEGRAM_API_URL;
+    assert.equal(getMaxVideoSize(), 50 * 1024 * 1024);
+    process.env.TELEGRAM_API_URL = 'https://api.telegram.org/';
+    assert.equal(getMaxVideoSize(), 50 * 1024 * 1024);
+    process.env.TELEGRAM_API_URL = 'http://api:8081';
+    assert.equal(getMaxVideoSize(), 2 * 1024 * 1024 * 1024);
+  } finally {
+    if (previous === undefined) delete process.env.TELEGRAM_API_URL;
+    else process.env.TELEGRAM_API_URL = previous;
   }
 }
 

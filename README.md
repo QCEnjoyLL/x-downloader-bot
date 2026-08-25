@@ -14,6 +14,7 @@
 - 🎯 默认最高清，自动选择最高码率
 - 🔗 上传后附带多清晰度链接
 - 💾 视频自动保存到本地（`./downloads` 目录）
+- 🌊 视频流式落盘并从磁盘上传，大文件不再整段载入内存
 - 🔄 双重 API（fxtwitter + vxtwitter），自动回退
 - 🚀 可选本地 Bot API，上传上限 **50MB → 2GB**
 - 🐳 Docker 部署，支持 amd64 / arm64
@@ -33,8 +34,7 @@
 wget https://raw.githubusercontent.com/QCEnjoyLL/x-downloader-bot/master/docker-compose.yml
 wget https://raw.githubusercontent.com/QCEnjoyLL/x-downloader-bot/master/.env.example -O .env
 
-# 编辑 .env 填入 BOT_TOKEN
-# 如果要突破 50MB 限制，还需填入 TELEGRAM_API_ID 和 TELEGRAM_API_HASH
+# 编辑 .env 填入 BOT_TOKEN；默认使用官方 API（50MB）
 
 docker compose up -d
 ```
@@ -71,7 +71,22 @@ docker compose pull && docker compose up -d
 | 模式 | 说明 |
 |------|------|
 | **轮询**（默认，`POLLING=true`） | 主动拉取消息，无需公网 IP，启动即用 |
-| Webhook | Telegram 推送，需要 HTTPS 公网地址 |
+| Webhook | Telegram 推送，需要 HTTPS 公网地址及安全密钥 |
+
+Webhook 模式必须配置 `WEBHOOK_URL`、`WEBHOOK_SECRET` 和 `WEBHOOK_SETUP_KEY`。启动后调用一次受保护的设置入口：
+
+```bash
+# .env
+POLLING=false
+WEBHOOK_URL=https://bot.example.com/webhook
+WEBHOOK_SECRET=随机字符串
+WEBHOOK_SETUP_KEY=另一段随机字符串
+
+curl -H "X-Webhook-Setup-Key: 另一段随机字符串" \
+  "https://bot.example.com/setup-webhook"
+```
+
+`WEBHOOK_SECRET` 会同时注册给 Telegram，并用于校验每次 Webhook 请求；设置密钥通过请求头传递，避免出现在 URL 日志中。不要把两个密钥写进公开日志或提交到仓库。
 
 ## 上传限制
 
@@ -86,8 +101,12 @@ docker compose pull && docker compose up -d
 # .env 中添加（先去 https://my.telegram.org/apps 创建应用）
 TELEGRAM_API_ID=12345678
 TELEGRAM_API_HASH=abcdef1234567890abcdef1234567890
-docker compose up -d
+TELEGRAM_API_URL=http://api:8081
+
+docker compose --profile local-api up -d
 ```
+
+不启用 `local-api` profile 时，Compose 不会启动本地 API 容器，Bot 会使用官方 API。接近 2GB 的文件虽然采用磁盘流式传输，但仍需预留足够的磁盘空间、上传时间和带宽。
 
 ## 命令
 
@@ -117,11 +136,26 @@ docker compose up -d
 | `POLLING` | 轮询模式 | `true` |
 | `PORT` | 服务端口 | `3000` |
 | `CLEANUP_VIDEOS` | 上传成功后删除本地视频 | `true` |
-| `DOWNLOAD_CONCURRENCY` | 多链接并发下载上限 | `3` |
+| `DOWNLOAD_CONCURRENCY` | 多链接并发下载上限（限制为 1–10） | `3` |
+| `DEBUG_UPDATES` | 记录完整消息内容（仅调试使用） | `false` |
 | `BROADCAST_RESOLVER_URL` | 直播回放第三方解析兜底接口（`{url}` 占位，可选） | — |
+| `ALLOW_PRIVATE_DOWNLOADS` | 允许下载解析到本机/私网的 URL（有 SSRF 风险） | `false` |
 | `TELEGRAM_API_ID` | 本地 API ID（可选） | — |
 | `TELEGRAM_API_HASH` | 本地 API Hash（可选） | — |
 | `TELEGRAM_API_URL` | API 地址 | `https://api.telegram.org` |
+| `WEBHOOK_URL` | 公网 HTTPS Webhook 完整地址 | — |
+| `WEBHOOK_SECRET` | Telegram 请求校验密钥 | — |
+| `WEBHOOK_SETUP_KEY` | `/setup-webhook` 管理入口密钥 | — |
+
+## 本地开发与检查
+
+```bash
+npm install
+npm test
+npm start
+```
+
+自测不需要真实 Bot Token；实际启动和端到端 Telegram 验证需要在 `.env` 中配置 Token。
 
 ## 镜像标签与发行版
 
@@ -130,7 +164,7 @@ docker compose up -d
 | 标签 | 说明 |
 |------|------|
 | `latest` | 最新版本 |
-| `v1.6.2` | 对应 package.json 中的版本 |
+| `v1.7.0` | 对应 package.json 中的版本 |
 
 > [Releases 页面](https://github.com/QCEnjoyLL/x-downloader-bot/releases) 与镜像版本一一对应。
 
