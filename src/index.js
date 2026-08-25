@@ -8,14 +8,30 @@ import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import { request as httpRequest } from 'node:http';
 import { request as httpsRequest } from 'node:https';
-import { lookup } from 'node:dns/promises';
+import { lookup as dnsLookup } from 'node:dns';
 import { isIP } from 'node:net';
+import { Agent } from 'undici';
 import { getUserMode, setUserMode, getUserQuality, setUserQuality } from './store.js';
+import { Semaphore } from './limiter.js';
+import { capLinks, checkChatAccess } from './access.js';
+import {
+  assertDownloadCapacity,
+  initializeStorage
+} from './storage.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DOWNLOADS_DIR = process.env.DOWNLOADS_DIR || join(__dirname, '..', 'downloads');
 const CLEANUP_VIDEOS = process.env.CLEANUP_VIDEOS !== 'false';  // 默认 true
 const DEBUG_UPDATES = process.env.DEBUG_UPDATES === 'true';
+const mediaLimiter = new Semaphore(getDownloadConcurrency());
+
+export function getMediaQueueStats() {
+  return mediaLimiter.stats();
+}
+
+export async function initializeDownloadStorage() {
+  return initializeStorage(DOWNLOADS_DIR);
+}
 
 // 版本号（从 package.json 读取一次，用于 /start 展示）
 const VERSION = (() => {
@@ -71,18 +87,33 @@ function isPrivateAddress(address) {
   return true;
 }
 
+// 在真正建立 socket 时校验 DNS 结果，避免“先检查、后解析”产生 DNS rebinding 窗口。
+const safeRemoteDispatcher = new Agent({
+  connect: {
+    lookup(hostname, options, callback) {
+      dnsLookup(hostname, { all: true, verbatim: true, family: options.family || 0 }, (error, addresses) => {
+        if (error) return callback(error);
+        if (!addresses.length || addresses.some(({ address }) => isPrivateAddress(address))) {
+          return callback(new Error('UNSAFE_URL: private or unresolved host is not allowed'));
+        }
+        const selected = addresses[0];
+        callback(null, selected.address, selected.family);
+      });
+    }
+  }
+});
+
 async function assertSafeRemoteUrl(url) {
   const parsed = new URL(url);
   if (!['http:', 'https:'].includes(parsed.protocol)) {
     throw new Error(`UNSAFE_URL: unsupported protocol ${parsed.protocol}`);
   }
   if (process.env.ALLOW_PRIVATE_DOWNLOADS === 'true') return parsed;
-  const hostname = parsed.hostname.toLowerCase();
+  const hostname = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, '');
   if (hostname === 'localhost' || hostname.endsWith('.localhost')) {
     throw new Error('UNSAFE_URL: private host is not allowed');
   }
-  const addresses = await lookup(hostname, { all: true, verbatim: true });
-  if (!addresses.length || addresses.some(({ address }) => isPrivateAddress(address))) {
+  if (isIP(hostname) && isPrivateAddress(hostname)) {
     throw new Error('UNSAFE_URL: private or unresolved host is not allowed');
   }
   return parsed;
@@ -90,7 +121,11 @@ async function assertSafeRemoteUrl(url) {
 
 async function fetchRemote(url, options = {}, redirects = 0) {
   const parsed = await assertSafeRemoteUrl(url);
-  const response = await fetch(parsed, { ...options, redirect: 'manual' });
+  const fetchOptions = { ...options, redirect: 'manual' };
+  if (process.env.ALLOW_PRIVATE_DOWNLOADS !== 'true') {
+    fetchOptions.dispatcher = safeRemoteDispatcher;
+  }
+  const response = await fetch(parsed, fetchOptions);
   if ([301, 302, 303, 307, 308].includes(response.status)) {
     if (redirects >= 5) throw new Error('DOWNLOAD_FAILED: too many redirects');
     const location = response.headers.get('Location');
@@ -112,6 +147,7 @@ function formatFileSize(bytes) {
 
 export async function getStatusHtml() {
   const token = getBotToken();
+  const polling = process.env.POLLING !== 'false';
   const webhookReady = Boolean(process.env.WEBHOOK_SECRET && process.env.WEBHOOK_SETUP_KEY);
   const time = new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' });
   return `<!DOCTYPE html>
@@ -134,8 +170,10 @@ export async function getStatusHtml() {
   <p>BOT_TOKEN 配置状态: ${token ? '已配置' : '未配置'}</p>
   <h2>🔧 设置</h2>
   ${token ? `
-    <p>Webhook 安全配置: ${webhookReady ? '已配置' : '未配置'}</p>
-    <p>Webhook 设置入口已受密钥保护，请按 README 中的命令调用。</p>
+    <p>运行模式: ${polling ? '轮询（无需 Webhook）' : 'Webhook'}</p>
+    ${polling
+      ? '<p>当前无需配置 Webhook。</p>'
+      : `<p>Webhook 安全配置: ${webhookReady ? '已配置' : '未配置'}</p><p>设置入口已受密钥保护，请按 README 中的命令调用。</p>`}
   ` : `
     <p>请在 .env 文件中配置 BOT_TOKEN</p>
   `}
@@ -156,6 +194,16 @@ export async function handleTelegramWebhook(update) {
 
       console.log(`Message received from chat ${chatId}`);
       if (DEBUG_UPDATES) console.log(`Message text: ${messageText}`);
+
+      const access = checkChatAccess(chatId, update.update_id);
+      if (!access.allowed) {
+        if (access.reason === 'rate_limited') {
+          await sendMessage(chatId, '⏳ 请求过于频繁，请稍后再试。', replyToMessageId);
+        } else {
+          console.warn(`Rejected unauthorized chat ${chatId}`);
+        }
+        return;
+      }
 
       // 处理 /start 命令
       if (messageText === '/start') {
@@ -192,27 +240,29 @@ export async function handleTelegramWebhook(update) {
       }
 
       // 检查是否包含直播回放链接（x.com/i/broadcasts/ID）— 需 yt-dlp/ffmpeg 合并 HLS
-      const broadcastUrls = extractBroadcastUrls(messageText);
+      const broadcastResult = capLinks(extractBroadcastUrls(messageText));
+      const broadcastUrls = broadcastResult.urls;
       if (broadcastUrls.length > 0) {
+        if (broadcastResult.dropped) {
+          await sendMessage(chatId, `⚠️ 每条消息最多处理 ${broadcastResult.limit} 个链接，已忽略 ${broadcastResult.dropped} 个。`, replyToMessageId);
+        }
         console.log('Found broadcast URLs:', broadcastUrls);
-        processBroadcastUrls(broadcastUrls, chatId, replyToMessageId).catch(error => {
-          console.error('Error in broadcast processing:', error);
-          sendMessage(chatId, `❌ 直播回放处理出错: ${error.message}`, replyToMessageId).catch(() => {});
-        });
+        await processBroadcastUrls(broadcastUrls, chatId, replyToMessageId);
         return;
       }
 
       // 检查是否包含视频直链（如 video.twimg.com/xxx.mp4）
-      const directUrls = extractDirectVideoUrls(messageText);
+      const directResult = capLinks(extractDirectVideoUrls(messageText));
+      const directUrls = directResult.urls;
       if (directUrls.length > 0) {
+        if (directResult.dropped) {
+          await sendMessage(chatId, `⚠️ 每条消息最多处理 ${directResult.limit} 个链接，已忽略 ${directResult.dropped} 个。`, replyToMessageId);
+        }
         console.log('Found direct video URLs:', directUrls);
         const mode = await getUserMode(chatId);
         if (mode === 'download') {
           const statusMsgId = await sendMessage(chatId, '🔍 检测到视频直链，正在下载...', replyToMessageId);
-          processDirectVideoUrls(directUrls, chatId, statusMsgId, replyToMessageId).catch(error => {
-            console.error('Error processing direct URLs:', error);
-            sendMessage(chatId, `❌ 处理出错: ${error.message}`, replyToMessageId).catch(() => {});
-          });
+          await processDirectVideoUrls(directUrls, chatId, statusMsgId, replyToMessageId);
         } else {
           await sendMessage(chatId, '🔗 检测到视频直链：\n' + directUrls.join('\n'), replyToMessageId);
         }
@@ -220,9 +270,13 @@ export async function handleTelegramWebhook(update) {
       }
 
       // 检查是否包含 Twitter/X 链接
-      const twitterUrls = extractTwitterUrls(messageText);
+      const twitterResult = capLinks(extractTwitterUrls(messageText));
+      const twitterUrls = twitterResult.urls;
 
       if (twitterUrls.length > 0) {
+        if (twitterResult.dropped) {
+          await sendMessage(chatId, `⚠️ 每条消息最多处理 ${twitterResult.limit} 个链接，已忽略 ${twitterResult.dropped} 个。`, replyToMessageId);
+        }
         console.log('Found Twitter URLs:', twitterUrls);
 
         // 获取用户模式偏好
@@ -230,12 +284,9 @@ export async function handleTelegramWebhook(update) {
         console.log(`User mode: ${mode}`);
 
         if (mode === 'download') {
-          // 下载模式：每个链接独立状态消息 + 并发处理（见 processUrlsDownload），立即返回保证回复迅速
+          // 下载模式：每个链接独立状态消息，由持久化任务等待全部处理完成。
           const urlsCopy = [...twitterUrls];
-          processUrlsDownload(urlsCopy, chatId, replyToMessageId).catch(error => {
-            console.error('Error in download processing:', error);
-            sendMessage(chatId, `❌ 处理过程中出错: ${error.message}`, replyToMessageId).catch(() => {});
-          });
+          await processUrlsDownload(urlsCopy, chatId, replyToMessageId);
         } else {
           // 链接模式：同步处理（现有逻辑）
           await sendMessage(chatId, '🔍 检测到 Twitter/X 链接，正在处理...', replyToMessageId);
@@ -260,6 +311,7 @@ export async function handleTelegramWebhook(update) {
 
   } catch (error) {
     console.error('Error handling webhook:', error);
+    throw error;
   }
 }
 
@@ -308,53 +360,58 @@ async function processDirectVideoUrls(urls, chatId, statusMsgId, replyToMessageI
     const url = urls[i];
     const label = urls.length > 1 ? ` [${i + 1}/${urls.length}]` : '';
 
-    await updateStatusMessage(chatId, statusMsgId,
-      `📥 下载视频${label}...`);
-
-    try {
-      await mkdir(DOWNLOADS_DIR, { recursive: true });
-
-      // URL 文件名可能带编码或不适合文件系统；加时间戳也避免并发覆盖。
-      const urlPath = new URL(url).pathname;
-      const rawName = basename(urlPath) || 'video.mp4';
-      const safeName = rawName.replace(/[^A-Za-z0-9._-]/g, '_');
-      const filename = `${Date.now()}_${i}_${safeName}`;
-      const filepath = join(DOWNLOADS_DIR, filename);
-
-      const onProg = makeProgress(chatId, statusMsgId, `下载视频${label}`);
-      const file = await downloadFileToDisk(url, filepath, MAX_SIZE, onProg);
-
-      // 尝试从 URL 中提取分辨率（如 /1280x720/）
-      const [dw, dh] = extractResolutionFromUrl(url);
-      const dimInfo = dw ? ` ${dw}x${dh}` : '';
-
+    await mediaLimiter.run(async () => {
       await updateStatusMessage(chatId, statusMsgId,
-        `📤 上传视频${label}${dimInfo} (${formatFileSize(file.size)})...`);
+        `📥 下载视频${label}...`);
 
-      const onUp = makeProgress(chatId, statusMsgId, `上传视频${label}`, '📤');
-      let videoSent = await uploadVideoFile(
-        chatId, file.path, file.contentType,
-        `🎬 视频直链${label}${dimInfo}`, null, dw, dh, replyToMessageId, onUp
-      );
+      try {
+        await mkdir(DOWNLOADS_DIR, { recursive: true });
 
-      if (!videoSent) {
-        videoSent = await uploadDocumentFile(
-          chatId, file.path, filename, file.contentType,
-          `🎬 视频直链${label}`, replyToMessageId, onUp
+        // URL 文件名可能带编码或不适合文件系统；加时间戳也避免并发覆盖。
+        const urlPath = new URL(url).pathname;
+        const rawName = basename(urlPath) || 'video.mp4';
+        const safeName = rawName.replace(/[^A-Za-z0-9._-]/g, '_');
+        const filename = `${Date.now()}_${i}_${safeName}`;
+        const filepath = join(DOWNLOADS_DIR, filename);
+
+        const onProg = makeProgress(chatId, statusMsgId, `下载视频${label}`);
+        const file = await downloadFileToDisk(url, filepath, MAX_SIZE, onProg);
+
+        // 尝试从 URL 中提取分辨率（如 /1280x720/）
+        const [dw, dh] = extractResolutionFromUrl(url);
+        const [probeW, probeH] = await getVideoDimensions(file.path);
+        const finalW = probeW || dw;
+        const finalH = probeH || dh;
+        const dimInfo = finalW ? ` ${finalW}x${finalH}` : '';
+
+        await updateStatusMessage(chatId, statusMsgId,
+          `📤 上传视频${label}${dimInfo} (${formatFileSize(file.size)})...`);
+
+        const onUp = makeProgress(chatId, statusMsgId, `上传视频${label}`, '📤');
+        let videoSent = await uploadVideoFile(
+          chatId, file.path, file.contentType,
+          `🎬 视频直链${label}${dimInfo}`, finalW, finalH, replyToMessageId, onUp
         );
-      }
 
-      if (videoSent && CLEANUP_VIDEOS) {
-        await cleanupFile(file.path);
-      }
+        if (!videoSent) {
+          videoSent = await uploadDocumentFile(
+            chatId, file.path, filename, file.contentType,
+            `🎬 视频直链${label}`, replyToMessageId, onUp
+          );
+        }
 
-      if (!videoSent) {
-        await sendMessage(chatId, `⚠️ 上传失败，直链：${url}`, replyToMessageId);
+        if (videoSent && CLEANUP_VIDEOS) {
+          await cleanupFile(file.path);
+        }
+
+        if (!videoSent) {
+          await sendMessage(chatId, `⚠️ 上传失败，直链：${url}`, replyToMessageId);
+        }
+      } catch (err) {
+        console.error('Direct video download failed:', err.message);
+        await sendMessage(chatId, `❌ 下载失败: ${err.message}\n直链：${url}`, replyToMessageId);
       }
-    } catch (err) {
-      console.error('Direct video download failed:', err.message);
-      await sendMessage(chatId, `❌ 下载失败: ${err.message}\n直链：${url}`, replyToMessageId);
-    }
+    });
   }
 
   await updateStatusMessage(chatId, statusMsgId, '✅ 处理完成！');
@@ -792,7 +849,7 @@ async function sendMediaResponse(chatId, mediaData, replyToMessageId) {
   }
 }
 
-async function sendPhoto(chatId, photoUrl, caption, replyToMessageId) {
+export async function sendPhoto(chatId, photoUrl, caption, replyToMessageId, fallbackToText = true) {
   try {
     const botToken = getBotToken();
     if (!botToken) {
@@ -821,9 +878,11 @@ async function sendPhoto(chatId, photoUrl, caption, replyToMessageId) {
     const result = await response.json().catch(() => null);
     if (!response.ok || !result?.ok) {
       console.error('Telegram sendPhoto API error:', response.status, result?.description || 'invalid response');
-      // 如果发送图片失败，回退到发送文本
-      console.log('Falling back to text message');
-      return await sendMessage(chatId, caption, replyToMessageId);
+      if (fallbackToText) {
+        console.log('Falling back to text message');
+        return Boolean(await sendMessage(chatId, caption, replyToMessageId));
+      }
+      return false;
     }
 
     console.log('Photo sent successfully');
@@ -831,8 +890,9 @@ async function sendPhoto(chatId, photoUrl, caption, replyToMessageId) {
 
   } catch (error) {
     console.error('Error sending photo:', error);
-    // 如果发送图片失败，回退到发送文本
-    return await sendMessage(chatId, caption, replyToMessageId);
+    return fallbackToText
+      ? Boolean(await sendMessage(chatId, caption, replyToMessageId))
+      : false;
   }
 }
 
@@ -947,17 +1007,14 @@ export async function runWithLimit(items, limit, worker) {
 }
 
 async function processUrlsDownload(twitterUrls, chatId, replyToMessageId) {
-  const limit = getDownloadConcurrency();
-
   // 立即为每个链接各发一条独立状态消息（引用原始消息）——保证回复迅速且能对应到具体链接
   const tasks = await Promise.all(twitterUrls.map(async (url) => {
     const statusId = await sendMessage(chatId, `🔍 排队中：${url}`, replyToMessageId);
     return { url, statusId };
   }));
 
-  // ponytail: downloadFile 把整文件读进内存，并发×2GB 会爆内存，故设上限；要再省内存就改成下载落盘后从磁盘上传
-  await runWithLimit(tasks, limit, ({ url, statusId }) =>
-    processTwitterUrlDownload(url, chatId, statusId, replyToMessageId));
+  await Promise.all(tasks.map(({ url, statusId }) =>
+    mediaLimiter.run(() => processTwitterUrlDownload(url, chatId, statusId, replyToMessageId))));
 }
 
 // ==================== 直播回放（broadcasts）====================
@@ -981,7 +1038,7 @@ function downloadBroadcastWithYtDlp(broadcastUrl, outPath, maxSizeBytes, onProgr
     // 进度和报错都透传到容器日志，并把下载百分比回调给上层更新 Telegram
     const handle = (buf) => {
       const s = buf.toString();
-      stderr += s;
+      stderr = (stderr + s).slice(-4000);
       for (const line of s.split(/\r?\n/)) {
         const t = line.trim();
         if (!t) continue;
@@ -1046,13 +1103,12 @@ async function resolveBroadcastViaThirdParty(broadcastUrl) {
 }
 
 async function processBroadcastUrls(urls, chatId, replyToMessageId) {
-  const limit = getDownloadConcurrency();
   const tasks = await Promise.all(urls.map(async (url) => {
     const statusId = await sendMessage(chatId, `🔴 排队中（直播回放）：${url}`, replyToMessageId);
     return { url, statusId };
   }));
-  await runWithLimit(tasks, limit, ({ url, statusId }) =>
-    processBroadcastUrl(url, chatId, statusId, replyToMessageId));
+  await Promise.all(tasks.map(({ url, statusId }) =>
+    mediaLimiter.run(() => processBroadcastUrl(url, chatId, statusId, replyToMessageId))));
 }
 
 async function processBroadcastUrl(broadcastUrl, chatId, statusMessageId, replyToMessageId) {
@@ -1066,6 +1122,8 @@ async function processBroadcastUrl(broadcastUrl, chatId, statusMessageId, replyT
   const outPath = join(DOWNLOADS_DIR, `broadcast_${bid}_${Date.now()}.mp4`);
   try {
     await mkdir(DOWNLOADS_DIR, { recursive: true });
+    // yt-dlp 不能在写入每个分片时回调磁盘检查，开始前按最大文件大小预留空间。
+    await assertDownloadCapacity(DOWNLOADS_DIR, MAX_SIZE);
     let lastEdit = 0;
     await downloadBroadcastWithYtDlp(broadcastUrl, outPath, MAX_SIZE, (pct) => {
       const now = Date.now();
@@ -1075,6 +1133,7 @@ async function processBroadcastUrl(broadcastUrl, chatId, statusMessageId, replyT
       }
     });
     const st = await stat(outPath);
+    await assertDownloadCapacity(DOWNLOADS_DIR, 0);
     if (st.size > MAX_SIZE) {
       await sendMessage(chatId, `⚠️ 直播回放过大（${formatFileSize(st.size)} > ${SIZE_LABEL}），无法上传`, replyToMessageId);
       await cleanupFile(outPath);
@@ -1084,7 +1143,7 @@ async function processBroadcastUrl(broadcastUrl, chatId, statusMessageId, replyT
     const [bw, bh] = await getVideoDimensions(outPath);
     await updateStatusMessage(chatId, statusMessageId, `📤 上传直播回放${bw ? ` ${bw}x${bh}` : ''}（${formatFileSize(st.size)}）...`);
     const onUp = makeProgress(chatId, statusMessageId, `上传直播回放 ${bid}`, '📤');
-    let sent = await uploadVideoFile(chatId, outPath, 'video/mp4', caption, null, bw, bh, replyToMessageId, onUp);
+    let sent = await uploadVideoFile(chatId, outPath, 'video/mp4', caption, bw, bh, replyToMessageId, onUp);
     if (!sent) sent = await uploadDocumentFile(chatId, outPath, `${bid}.mp4`, 'video/mp4', caption, replyToMessageId, onUp);
     if (sent && CLEANUP_VIDEOS) await cleanupFile(outPath);
     if (sent) {
@@ -1105,7 +1164,7 @@ async function processBroadcastUrl(broadcastUrl, chatId, statusMessageId, replyT
       const file = await downloadFileToDisk(directUrl, fallbackPath, MAX_SIZE);
       await updateStatusMessage(chatId, statusMessageId, `📤 上传直播回放（${formatFileSize(file.size)}）...`);
       const onUp = makeProgress(chatId, statusMessageId, `上传直播回放 ${bid}`, '📤');
-      let sent = await uploadVideoFile(chatId, file.path, file.contentType, caption, null, null, null, replyToMessageId, onUp);
+      let sent = await uploadVideoFile(chatId, file.path, file.contentType, caption, null, null, replyToMessageId, onUp);
       if (!sent) sent = await uploadDocumentFile(chatId, file.path, `${bid}.mp4`, file.contentType, caption, replyToMessageId, onUp);
       if (sent) {
         if (CLEANUP_VIDEOS) await cleanupFile(file.path);
@@ -1195,13 +1254,14 @@ async function processTwitterUrlDownload(originalUrl, chatId, statusMessageId, r
 
         await sendChatAction(chatId, 'upload_photo');
 
-        const sent = await sendPhoto(chatId, photo.url, caption, replyToMessageId);
+        const sent = await sendPhoto(chatId, photo.url, caption, replyToMessageId, false);
         if (!sent) {
           await updateStatusMessage(chatId, statusMessageId,
             `📥 下载图片 ${i + 1}/${mediaData.photos.length}...`);
           try {
             const file = await downloadFile(photo.url, 10 * 1024 * 1024);
-            await uploadPhotoFile(chatId, file.buffer, file.contentType, caption);
+            const uploaded = await uploadPhotoFile(chatId, file.buffer, file.contentType, caption, replyToMessageId);
+            if (!uploaded) await sendMessage(chatId, caption, replyToMessageId);
           } catch (downloadErr) {
             console.error('Photo download failed:', downloadErr);
             await sendMessage(chatId, caption, replyToMessageId);
@@ -1241,6 +1301,7 @@ async function processTwitterUrlDownload(originalUrl, chatId, statusMessageId, r
           let videoSent = false;
 
           for (const tryUrl of urlsToTry) {
+            const [urlW, urlH] = extractResolutionFromUrl(tryUrl);
             const tryInfo = tryUrl === selected.url && selected.estimatedSize
               ? ` (${selected.sizeAccurate ? '' : '约 '}${formatFileSize(selected.estimatedSize)})`
               : '';
@@ -1248,7 +1309,9 @@ async function processTwitterUrlDownload(originalUrl, chatId, statusMessageId, r
             // 策略1: URL 直传
             await updateStatusMessage(chatId, statusMessageId,
               `📤 上传视频 ${i + 1}/${mediaData.videos.length}${tryInfo}...`);
-            videoSent = await sendVideoByUrl(chatId, tryUrl, videoCaption, vidW, vidH, replyToMessageId);
+            videoSent = await sendVideoByUrl(
+              chatId, tryUrl, videoCaption, urlW || vidW, urlH || vidH, replyToMessageId
+            );
             if (videoSent) break;
 
             // 策略2: 下载后上传
@@ -1265,8 +1328,10 @@ async function processTwitterUrlDownload(originalUrl, chatId, statusMessageId, r
                 `📤 上传视频 ${i + 1}/${mediaData.videos.length} ` +
                 `(${formatFileSize(file.size)})...`);
               const onUp = makeProgress(chatId, statusMessageId, `上传视频 ${i + 1}/${mediaData.videos.length}`, '📤');
+              const [actualW, actualH] = await getVideoDimensions(file.path);
               videoSent = await uploadVideoFile(
-                chatId, file.path, file.contentType, videoCaption, video.thumbnailUrl, vidW, vidH, replyToMessageId, onUp
+                chatId, file.path, file.contentType, videoCaption,
+                actualW || vidW, actualH || vidH, replyToMessageId, onUp
               );
 
               if (videoSent) {
@@ -1353,12 +1418,12 @@ export async function selectVideoVariant(video, qualityPreference, maxSizeBytes)
     const durationSeconds = parseFloat(video.duration) || 0;
 
     candidates = video.variants
-      .filter(v => v.bitrate && v.bitrate > 0)
+      .filter(v => v.url)
       .map(v => ({
         url: v.url,
         bitrate: v.bitrate || 0,
         // 粗估仅用于排序/兜底：bitrate(bps) × duration(s) ÷ 8，加 15% 容器开销
-        estimatedSize: durationSeconds > 0
+        estimatedSize: durationSeconds > 0 && v.bitrate > 0
           ? Math.ceil((v.bitrate * durationSeconds) / 8 * 1.15)
           : null
       }));
@@ -1392,7 +1457,8 @@ export async function selectVideoVariant(video, qualityPreference, maxSizeBytes)
 
   // 逐个 HEAD 取真实大小，选第一个不超限的（HEAD 次数通常 1~3）
   let minSeen = Infinity;
-  for (const c of order) {
+  for (let candidateIndex = 0; candidateIndex < order.length; candidateIndex++) {
+    const c = order[candidateIndex];
     const realSize = await getRemoteFileSize(c.url);
     const size = realSize != null ? realSize : c.estimatedSize;
     if (size != null && size < minSeen) minSeen = size;
@@ -1405,7 +1471,7 @@ export async function selectVideoVariant(video, qualityPreference, maxSizeBytes)
         availableCount: candidates.length,
         // 高画质：保留其余 variant 作为上传失败时的回退
         fallbacks: qualityPreference === 'high'
-          ? order.filter(x => x.url !== c.url).map(x => x.url)
+          ? order.slice(candidateIndex + 1).map(x => x.url)
           : []
       };
     }
@@ -1546,9 +1612,11 @@ export async function downloadFileToDisk(url, filepath, maxSizeBytes, onProgress
       throw new Error(`SIZE_EXCEEDED: ${formatFileSize(contentLength)} > ${formatFileSize(maxSizeBytes)}`);
     }
 
+    await assertDownloadCapacity(dirname(filepath), contentLength || 0);
     handle = await open(filepath, 'w');
     const reader = response.body.getReader();
     let totalSize = 0;
+    let nextDiskCheck = 64 * 1024 * 1024;
 
     while (true) {
       const { done, value } = await reader.read();
@@ -1563,11 +1631,17 @@ export async function downloadFileToDisk(url, filepath, maxSizeBytes, onProgress
         const { bytesWritten } = await handle.write(value, offset, value.length - offset);
         offset += bytesWritten;
       }
+      if (!contentLength && totalSize >= nextDiskCheck) {
+        await assertDownloadCapacity(dirname(filepath), 0);
+        nextDiskCheck += 64 * 1024 * 1024;
+      }
       if (onProgress) onProgress(totalSize, contentLength);
     }
 
     await handle.close();
     handle = null;
+    // 多个并发下载可能同时通过下载前检查；完成后再校验一次并在超限时删除本文件。
+    await assertDownloadCapacity(dirname(filepath), 0);
     console.log(`Downloaded to disk: ${filepath} (${formatFileSize(totalSize)})`);
     return { path: filepath, contentType, size: totalSize };
   } catch (error) {
@@ -1728,14 +1802,13 @@ function multipartSource(source, field, filename, contentType) {
     : { field, filename, contentType, data: source };
 }
 
-async function uploadVideoFile(chatId, source, contentType, caption, thumbnailUrl, width, height, replyToMessageId, onProgress) {
+async function uploadVideoFile(chatId, source, contentType, caption, width, height, replyToMessageId, onProgress) {
   const botToken = getBotToken();
   if (!botToken) return false;
 
   const endpoint = `${getTelegramApiUrl()}/bot${botToken}/sendVideo`;
   const fields = { chat_id: String(chatId), supports_streaming: 'true' };
   if (caption) fields.caption = caption;
-  if (thumbnailUrl) fields.thumb = thumbnailUrl;
   if (width) fields.width = String(width);
   if (height) fields.height = String(height);
   if (replyToMessageId) { fields.reply_to_message_id = String(replyToMessageId); fields.allow_sending_without_reply = 'true'; }
@@ -1759,7 +1832,7 @@ async function uploadVideoFile(chatId, source, contentType, caption, thumbnailUr
   } catch (e2) { console.error('sendVideo fallback error:', e2.message); return false; }
 }
 
-async function uploadPhotoFile(chatId, buffer, contentType, caption) {
+async function uploadPhotoFile(chatId, buffer, contentType, caption, replyToMessageId) {
   try {
     const botToken = getBotToken();
     if (!botToken) return false;
@@ -1768,6 +1841,10 @@ async function uploadPhotoFile(chatId, buffer, contentType, caption) {
     formData.append('chat_id', chatId.toString());
     formData.append('photo', new Blob([buffer], { type: contentType }), 'photo.jpg');
     if (caption) formData.append('caption', caption);
+    if (replyToMessageId) {
+      formData.append('reply_to_message_id', String(replyToMessageId));
+      formData.append('allow_sending_without_reply', 'true');
+    }
 
     console.log(`Uploading photo: ${formatFileSize(buffer.byteLength)}`);
 

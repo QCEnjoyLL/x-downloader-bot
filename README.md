@@ -16,6 +16,9 @@
 - 💾 视频自动保存到本地（`./downloads` 目录）
 - 🌊 视频流式落盘并从磁盘上传，大文件不再整段载入内存
 - 📤 上传完成传输后显示 Telegram 处理状态和等待时间
+- 🧰 Telegram 更新先写入 SQLite 持久化队列，异常重启后自动续跑
+- 🛡️ 支持 Chat 白名单、请求限速、单消息链接上限和全局媒体并发
+- 💽 支持下载文件保留期、目录配额和磁盘剩余空间保护
 - 🔄 双重 API（fxtwitter + vxtwitter），自动回退
 - 🚀 可选本地 Bot API，上传上限 **50MB → 2GB**
 - 🐳 Docker 部署，支持 amd64 / arm64
@@ -126,6 +129,7 @@ docker compose up -d
 ```
 .
 ├── data/prefs.json      # 用户偏好（首次使用 /mode 或 /quality 后生成）
+├── data/jobs.sqlite     # Telegram update 持久化任务队列
 ├── downloads/           # 下载的视频文件（上传失败会保留）
 ├── telegram-api/        # 本地 API 缓存
 └── .env                 # 环境变量
@@ -139,8 +143,16 @@ docker compose up -d
 | `POLLING` | 轮询模式 | `true` |
 | `HOST_PORT` | Docker Compose 暴露到宿主机的端口 | `3000` |
 | `PORT` | Bot 内部监听端口（Compose 固定为 3000） | `3000` |
-| `CLEANUP_VIDEOS` | 上传成功后删除本地视频 | `true` |
-| `DOWNLOAD_CONCURRENCY` | 多链接并发下载上限（限制为 1–10） | `3` |
+| `CLEANUP_VIDEOS` | 上传成功后立即删除本地视频；关闭后仍受保留期约束 | `true` |
+| `DOWNLOAD_CONCURRENCY` | 所有用户共享的媒体下载/上传并发上限（1–10） | `3` |
+| `UPDATE_CONCURRENCY` | 持久化 update 队列工作线程数（1–32） | `8` |
+| `JOB_MAX_ATTEMPTS` | update 任务失败后的最大尝试次数 | `3` |
+| `MAX_LINKS_PER_MESSAGE` | 每条消息最多处理的链接数 | `5` |
+| `MAX_REQUESTS_PER_MINUTE` | 每个 Chat 每分钟最多请求数 | `10` |
+| `ALLOWED_CHAT_IDS` | Chat ID 白名单，逗号分隔；留空允许所有 Chat | — |
+| `DOWNLOAD_RETENTION_HOURS` | 下载文件保留小时数；`0` 表示不定时清理 | `24` |
+| `MAX_DOWNLOAD_DISK_GB` | 下载目录最大容量；`0` 表示不限制 | `20` |
+| `MIN_FREE_DISK_GB` | 下载时必须保留的磁盘可用空间；`0` 表示不限制 | `1` |
 | `DEBUG_UPDATES` | 记录完整消息内容（仅调试使用） | `false` |
 | `BROADCAST_RESOLVER_URL` | 直播回放第三方解析兜底接口（`{url}` 占位，可选） | — |
 | `ALLOW_PRIVATE_DOWNLOADS` | 允许下载解析到本机/私网的 URL（有 SSRF 风险） | `false` |
@@ -160,7 +172,15 @@ npm test
 npm start
 ```
 
-自测不需要真实 Bot Token；实际启动和端到端 Telegram 验证需要在 `.env` 中配置 Token。
+本地运行要求 Node.js 22.19 或更高版本。自测不需要真实 Bot Token；实际启动和端到端 Telegram 验证需要在 `.env` 中配置 Token。
+
+## 稳定性与访问控制
+
+轮询和 Webhook 收到的 Telegram update 都会先写入 `data/jobs.sqlite`，写入成功后才确认接收。相同 `update_id` 不会重复入队；进程异常退出时，正在执行的任务会在下次启动后重新进入队列。失败任务按指数退避重试，达到 `JOB_MAX_ATTEMPTS` 后保留为失败状态，便于通过 `/health` 查看统计。
+
+公开部署建议配置 `ALLOWED_CHAT_IDS`，例如 `123456789,-1001234567890`。限速按 Chat 计算；`DOWNLOAD_CONCURRENCY` 是整个进程的全局上限，不会因用户增多而无限增加下载、上传和磁盘压力。
+
+下载目录每小时清理超过 `DOWNLOAD_RETENTION_HOURS` 的文件。即使 `CLEANUP_VIDEOS=false`，文件默认也只保留 24 小时；需要永久保留时再将 `DOWNLOAD_RETENTION_HOURS=0`。`MAX_DOWNLOAD_DISK_GB` 和 `MIN_FREE_DISK_GB` 会在下载前及下载过程中阻止磁盘被占满。
 
 ## 镜像标签与发行版
 
@@ -169,7 +189,7 @@ npm start
 | 标签 | 说明 |
 |------|------|
 | `latest` | 最新版本 |
-| `v1.7.2` | 对应 package.json 中的版本 |
+| `v1.8.0` | 对应 package.json 中的版本 |
 
 > [Releases 页面](https://github.com/QCEnjoyLL/x-downloader-bot/releases) 与镜像版本一一对应。
 

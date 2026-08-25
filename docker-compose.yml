@@ -1,6 +1,6 @@
 services:
   api:
-    image: aiogram/telegram-bot-api:latest
+    image: aiogram/telegram-bot-api:10.2
     container_name: xbot-api
     profiles: ["local-api"]
     environment:
@@ -21,6 +21,14 @@ services:
       - POLLING=${POLLING:-true}
       - CLEANUP_VIDEOS=${CLEANUP_VIDEOS:-true}
       - DOWNLOAD_CONCURRENCY=${DOWNLOAD_CONCURRENCY:-3}
+      - UPDATE_CONCURRENCY=${UPDATE_CONCURRENCY:-8}
+      - MAX_LINKS_PER_MESSAGE=${MAX_LINKS_PER_MESSAGE:-5}
+      - MAX_REQUESTS_PER_MINUTE=${MAX_REQUESTS_PER_MINUTE:-10}
+      - ALLOWED_CHAT_IDS=${ALLOWED_CHAT_IDS:-}
+      - JOB_MAX_ATTEMPTS=${JOB_MAX_ATTEMPTS:-3}
+      - DOWNLOAD_RETENTION_HOURS=${DOWNLOAD_RETENTION_HOURS:-24}
+      - MAX_DOWNLOAD_DISK_GB=${MAX_DOWNLOAD_DISK_GB:-20}
+      - MIN_FREE_DISK_GB=${MIN_FREE_DISK_GB:-1}
       - DEBUG_UPDATES=${DEBUG_UPDATES:-false}
       - BROADCAST_RESOLVER_URL=${BROADCAST_RESOLVER_URL:-}
       - ALLOW_PRIVATE_DOWNLOADS=${ALLOW_PRIVATE_DOWNLOADS:-false}

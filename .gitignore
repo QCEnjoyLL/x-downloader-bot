@@ -9,6 +9,7 @@ node_modules/
 # Runtime data
 data/*.json
 data/*.tmp
+data/*.sqlite*
 downloads/
 telegram-api/
 *.log

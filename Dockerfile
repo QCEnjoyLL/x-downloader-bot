@@ -1,4 +1,4 @@
-FROM node:20-alpine
+FROM node:24-alpine
 
 WORKDIR /app
 
@@ -7,7 +7,7 @@ WORKDIR /app
 RUN ALPINE_VER=$(cut -d'.' -f1,2 < /etc/alpine-release) && \
     echo "https://dl-cdn.alpinelinux.org/alpine/v${ALPINE_VER}/community" >> /etc/apk/repositories && \
     apk add --no-cache ffmpeg python3 py3-pip && \
-    pip3 install --no-cache-dir --break-system-packages yt-dlp
+    pip3 install --no-cache-dir --break-system-packages yt-dlp==2026.8.19
 
 # 安装依赖（仅生产）
 COPY package.json package-lock.json* ./

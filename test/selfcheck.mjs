@@ -2,7 +2,7 @@
 // 覆盖链接识别、并发限制、画质选择、内存/磁盘上传、流式落盘和 API 上限判断。
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
-import { mkdtemp, writeFile, readFile, rm, stat } from 'node:fs/promises';
+import { mkdtemp, writeFile, readFile, rm, stat, utimes } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -12,8 +12,10 @@ import {
   getMaxVideoSize,
   runWithLimit,
   selectVideoVariant,
-  uploadMultipart
+  uploadMultipart,
+  sendPhoto
 } from '../src/index.js';
+import { Semaphore } from '../src/limiter.js';
 
 // 1) extractBroadcastUrls：命中 broadcasts，不误匹配普通 status
 {
@@ -81,6 +83,7 @@ import {
     // high 但限制 50MB：高档(100M)放不下，应降到能放下的中档(30M)
     const capped = await selectVideoVariant(video, 'high', 50 * 1024 * 1024);
     assert.equal(capped.url, 'http://v/mid.mp4', 'high 超限时应降到能放下的最高档');
+    assert.deepEqual(capped.fallbacks, ['http://v/low.mp4'], '回退列表不应重新包含已知超限的高档');
 
     // 限制 1MB：全部超限，应报最小真实大小(5MB)
     const tooBig = await selectVideoVariant(video, 'high', 1 * 1024 * 1024);
@@ -251,6 +254,138 @@ import {
   assert.equal(messages.length, 3, '完成和等待事件不应被普通进度节流');
   assert.match(messages[1], /100%.*Telegram 处理中/, '完成传输后应显示 Telegram 处理阶段');
   assert.match(messages[2], /已等待 5 秒/, '等待阶段应显示已等待时间');
+}
+
+// 9) 全局信号量：跨任务共享并发上限
+{
+  const limiter = new Semaphore(2);
+  let active = 0, peak = 0;
+  await Promise.all(Array.from({ length: 8 }, (_, i) => limiter.run(async () => {
+    active++;
+    peak = Math.max(peak, active);
+    await new Promise(resolve => setTimeout(resolve, 5 + i));
+    active--;
+  })));
+  assert.equal(peak, 2, '全局信号量应严格限制并发');
+  assert.deepEqual(limiter.stats(), { active: 0, queued: 0, limit: 2 });
+}
+
+// 10) sendPhoto：下载模式下远程发送失败必须返回 false，不能被文字回退伪装成成功
+{
+  const previousToken = process.env.BOT_TOKEN;
+  const realFetch = globalThis.fetch;
+  process.env.BOT_TOKEN = '123:test';
+  try {
+    globalThis.fetch = async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ ok: false, description: 'remote photo rejected' })
+    });
+    assert.equal(await sendPhoto(1, 'https://example.com/a.jpg', 'caption', 2, false), false);
+
+    let calls = 0;
+    globalThis.fetch = async () => {
+      calls++;
+      return calls === 1
+        ? { ok: true, status: 200, json: async () => ({ ok: false, description: 'rejected' }) }
+        : { ok: true, status: 200, json: async () => ({ ok: true, result: { message_id: 42 } }) };
+    };
+    assert.equal(await sendPhoto(1, 'https://example.com/a.jpg', 'caption'), true);
+    assert.equal(calls, 2, '链接模式仍应在图片失败后回退到文字');
+  } finally {
+    globalThis.fetch = realFetch;
+    if (previousToken === undefined) delete process.env.BOT_TOKEN;
+    else process.env.BOT_TOKEN = previousToken;
+  }
+}
+
+// 11) SQLite update 队列：update_id 幂等、持久化并由 worker 完成
+{
+  const dir = await mkdtemp(join(tmpdir(), 'xbot-jobs-'));
+  const previousDb = process.env.JOB_DB_FILE;
+  process.env.JOB_DB_FILE = join(dir, 'jobs.sqlite');
+  let queue = await import(`../src/job-queue.js?test=${Date.now()}`);
+  let reopened;
+  try {
+    const first = { update_id: 100, message: { chat: { id: 1 }, text: '/start' } };
+    const second = { update_id: 101, message: { chat: { id: 1 }, text: '/mode' } };
+    assert.equal(queue.enqueueTelegramUpdate(first).inserted, true);
+    assert.equal(queue.enqueueTelegramUpdate(first).inserted, false);
+    assert.equal(queue.enqueueTelegramUpdate(second).inserted, true);
+    await queue.closeJobQueue();
+    queue = null;
+
+    reopened = await import(`../src/job-queue.js?reopen=${Date.now()}`);
+    assert.equal(reopened.getJobQueueStats().pending, 2, '重启后应保留未处理任务');
+    const processed = [];
+    let sameChatActive = false;
+    reopened.startUpdateWorkers(async update => {
+      assert.equal(sameChatActive, false, '同一 chat 的 update 不应并行');
+      sameChatActive = true;
+      processed.push(update.update_id);
+      await new Promise(resolve => setTimeout(resolve, 30));
+      sameChatActive = false;
+    }, 2);
+    const deadline = Date.now() + 3000;
+    while (reopened.getJobQueueStats().completed !== 2 && Date.now() < deadline) {
+      await new Promise(resolve => setTimeout(resolve, 20));
+    }
+    assert.deepEqual(processed, [100, 101]);
+    assert.equal(reopened.getJobQueueStats().completed, 2);
+  } finally {
+    if (reopened) await reopened.closeJobQueue();
+    else if (queue) await queue.closeJobQueue();
+    await rm(dir, { recursive: true, force: true });
+    if (previousDb === undefined) delete process.env.JOB_DB_FILE;
+    else process.env.JOB_DB_FILE = previousDb;
+  }
+}
+
+// 12) 下载目录维护：删除超过保留时间的文件
+{
+  const dir = await mkdtemp(join(tmpdir(), 'xbot-storage-'));
+  const oldFile = join(dir, 'old.mp4');
+  const newFile = join(dir, 'new.mp4');
+  await writeFile(oldFile, 'old');
+  await writeFile(newFile, 'new');
+  const oldTime = new Date(Date.now() - 48 * 60 * 60 * 1000);
+  await utimes(oldFile, oldTime, oldTime);
+  const storage = await import(`../src/storage.js?test=${Date.now()}`);
+  try {
+    assert.equal(await storage.cleanupExpiredDownloads(dir), 1);
+    await assert.rejects(stat(oldFile), /ENOENT/);
+    assert.equal((await stat(newFile)).isFile(), true);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
+// 13) 访问控制：chat 白名单、幂等计数、频率限制和链接数量限制
+{
+  const previous = {
+    allowed: process.env.ALLOWED_CHAT_IDS,
+    requests: process.env.MAX_REQUESTS_PER_MINUTE,
+    links: process.env.MAX_LINKS_PER_MESSAGE
+  };
+  process.env.ALLOWED_CHAT_IDS = '1,2';
+  process.env.MAX_REQUESTS_PER_MINUTE = '2';
+  process.env.MAX_LINKS_PER_MESSAGE = '2';
+  const access = await import(`../src/access.js?test=${Date.now()}`);
+  try {
+    assert.equal(access.checkChatAccess(3, 1).reason, 'not_allowed');
+    assert.equal(access.checkChatAccess(1, 10).allowed, true);
+    assert.equal(access.checkChatAccess(1, 10).allowed, true, '同一 update 重试不应重复计数');
+    assert.equal(access.checkChatAccess(1, 11).allowed, true);
+    assert.equal(access.checkChatAccess(1, 12).reason, 'rate_limited');
+    assert.deepEqual(access.capLinks(['a', 'b', 'c']), { urls: ['a', 'b'], dropped: 1, limit: 2 });
+  } finally {
+    if (previous.allowed === undefined) delete process.env.ALLOWED_CHAT_IDS;
+    else process.env.ALLOWED_CHAT_IDS = previous.allowed;
+    if (previous.requests === undefined) delete process.env.MAX_REQUESTS_PER_MINUTE;
+    else process.env.MAX_REQUESTS_PER_MINUTE = previous.requests;
+    if (previous.links === undefined) delete process.env.MAX_LINKS_PER_MESSAGE;
+    else process.env.MAX_LINKS_PER_MESSAGE = previous.links;
+  }
 }
 
 console.log('✅ selfcheck passed');

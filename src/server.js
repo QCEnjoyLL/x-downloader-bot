@@ -5,8 +5,16 @@ import { timingSafeEqual } from 'node:crypto';
 import {
   handleTelegramWebhook,
   setupWebhook,
-  getStatusHtml
+  getStatusHtml,
+  getMediaQueueStats,
+  initializeDownloadStorage
 } from './index.js';
+import {
+  closeJobQueue,
+  enqueueTelegramUpdate,
+  getJobQueueStats,
+  startUpdateWorkers
+} from './job-queue.js';
 
 const PORT = process.env.PORT || 3000;
 const POLLING = process.env.POLLING !== 'false';
@@ -14,6 +22,8 @@ const BOT_TOKEN = process.env.BOT_TOKEN || '';
 const TELEGRAM_API = process.env.TELEGRAM_API_URL || 'https://api.telegram.org';
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || '';
 const WEBHOOK_SETUP_KEY = process.env.WEBHOOK_SETUP_KEY || '';
+const UPDATE_CONCURRENCY = process.env.UPDATE_CONCURRENCY || 8;
+let shuttingDown = false;
 
 const app = express();
 app.use(express.json({ limit: '1mb' }));
@@ -43,11 +53,13 @@ app.post('/webhook', async (req, res) => {
   if (!secretsMatch(req.get('X-Telegram-Bot-Api-Secret-Token'), WEBHOOK_SECRET)) {
     return res.status(401).send('Unauthorized');
   }
-  // Telegram 需要快速收到 200；实际处理异步进行，避免耗时下载触发重复投递。
-  res.status(200).send('OK');
-  handleTelegramWebhook(req.body).catch(err => {
-    console.error('Webhook error:', err);
-  });
+  try {
+    const queued = enqueueTelegramUpdate(req.body);
+    res.status(200).json({ ok: true, duplicate: !queued.inserted });
+  } catch (error) {
+    console.error('Webhook enqueue error:', error);
+    res.status(500).send('Failed to persist update');
+  }
 });
 
 // Webhook 设置助手
@@ -69,16 +81,32 @@ app.get('/setup-webhook', async (req, res) => {
 
 // 健康检查
 app.get('/health', (_req, res) => {
-  res.json({ status: 'ok', mode: POLLING ? 'polling' : 'webhook' });
+  res.json({
+    status: 'ok',
+    mode: POLLING ? 'polling' : 'webhook',
+    jobs: getJobQueueStats(),
+    media: getMediaQueueStats()
+  });
 });
 
-app.listen(PORT, () => {
+const server = app.listen(PORT, async () => {
   console.log(`🤖 X Downloader Bot running on port ${PORT}`);
   if (!BOT_TOKEN) {
     console.error('⚠️  BOT_TOKEN 未设置！请检查 .env 文件');
     process.exit(1);
   }
   console.log('✅ BOT_TOKEN 已配置');
+  try {
+    await initializeDownloadStorage();
+  } catch (error) {
+    console.error('❌ 下载目录不可用:', error.message);
+    process.exit(1);
+  }
+  startUpdateWorkers(handleTelegramWebhook, UPDATE_CONCURRENCY);
+  const maintenance = setInterval(() => {
+    initializeDownloadStorage().catch(error => console.error('Storage maintenance failed:', error.message));
+  }, 60 * 60 * 1000);
+  maintenance.unref();
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
   console.log('  🤖 X Downloader Bot');
   console.log('  默认：📥 下载模式 + 🎯 最高清');
@@ -111,11 +139,10 @@ async function startPolling() {
         return false;
       }
 
+      if (shuttingDown) return true;
       for (const update of data.result) {
+        enqueueTelegramUpdate(update);
         offset = update.update_id + 1;
-        handleTelegramWebhook(update).catch(err => {
-          console.error('Handle update error:', err);
-        });
       }
       return true;
     } catch (err) {
@@ -139,7 +166,7 @@ async function startPolling() {
   console.log('🔄 轮询中...');
 
   // 持续轮询
-  while (true) {
+  while (!shuttingDown) {
     const ok = await poll();
     if (ok) {
       retryDelay = 1000;
@@ -150,3 +177,26 @@ async function startPolling() {
     retryDelay = Math.min(retryDelay * 2, 30000);
   }
 }
+
+async function shutdown(signal) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`${signal} received, stopping HTTP intake`);
+  server.close();
+  const forceExit = setTimeout(() => {
+    console.error('Graceful shutdown timed out; pending jobs will resume after restart');
+    process.exit(1);
+  }, 30000);
+  forceExit.unref();
+  try {
+    await closeJobQueue();
+    clearTimeout(forceExit);
+    process.exit(0);
+  } catch (error) {
+    console.error('Graceful shutdown failed:', error);
+    process.exit(1);
+  }
+}
+
+process.once('SIGTERM', () => shutdown('SIGTERM'));
+process.once('SIGINT', () => shutdown('SIGINT'));
