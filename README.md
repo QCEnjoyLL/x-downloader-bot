@@ -34,7 +34,8 @@
 wget https://raw.githubusercontent.com/QCEnjoyLL/x-downloader-bot/master/docker-compose.yml
 wget https://raw.githubusercontent.com/QCEnjoyLL/x-downloader-bot/master/.env.example -O .env
 
-# 编辑 .env 填入 BOT_TOKEN；默认使用官方 API（50MB）
+# 编辑 .env 填入 BOT_TOKEN
+# HOST_PORT 可修改宿主机端口；COMPOSE_PROFILES 控制是否启用本地 API
 
 docker compose up -d
 ```
@@ -99,14 +100,15 @@ curl -H "X-Webhook-Setup-Key: 另一段随机字符串" \
 
 ```bash
 # .env 中添加（先去 https://my.telegram.org/apps 创建应用）
+COMPOSE_PROFILES=local-api
 TELEGRAM_API_ID=12345678
 TELEGRAM_API_HASH=abcdef1234567890abcdef1234567890
 TELEGRAM_API_URL=http://api:8081
 
-docker compose --profile local-api up -d
+docker compose up -d
 ```
 
-不启用 `local-api` profile 时，Compose 不会启动本地 API 容器，Bot 会使用官方 API。接近 2GB 的文件虽然采用磁盘流式传输，但仍需预留足够的磁盘空间、上传时间和带宽。
+将 `COMPOSE_PROFILES` 留空并将 `TELEGRAM_API_URL` 留空即可禁用 API 容器，Bot 会使用官方 API。设为 `local-api` 后，普通的 `docker compose up -d` 就会同时启动 API 容器。接近 2GB 的文件虽然采用磁盘流式传输，但仍需预留足够的磁盘空间、上传时间和带宽。
 
 ## 命令
 
@@ -134,12 +136,14 @@ docker compose --profile local-api up -d
 |------|------|------|
 | `BOT_TOKEN` | Telegram Bot Token | — |
 | `POLLING` | 轮询模式 | `true` |
-| `PORT` | 服务端口 | `3000` |
+| `HOST_PORT` | Docker Compose 暴露到宿主机的端口 | `3000` |
+| `PORT` | Bot 内部监听端口（Compose 固定为 3000） | `3000` |
 | `CLEANUP_VIDEOS` | 上传成功后删除本地视频 | `true` |
 | `DOWNLOAD_CONCURRENCY` | 多链接并发下载上限（限制为 1–10） | `3` |
 | `DEBUG_UPDATES` | 记录完整消息内容（仅调试使用） | `false` |
 | `BROADCAST_RESOLVER_URL` | 直播回放第三方解析兜底接口（`{url}` 占位，可选） | — |
 | `ALLOW_PRIVATE_DOWNLOADS` | 允许下载解析到本机/私网的 URL（有 SSRF 风险） | `false` |
+| `COMPOSE_PROFILES` | `local-api` 启用本地 API 容器，留空禁用 | — |
 | `TELEGRAM_API_ID` | 本地 API ID（可选） | — |
 | `TELEGRAM_API_HASH` | 本地 API Hash（可选） | — |
 | `TELEGRAM_API_URL` | API 地址 | `https://api.telegram.org` |
@@ -164,7 +168,7 @@ npm start
 | 标签 | 说明 |
 |------|------|
 | `latest` | 最新版本 |
-| `v1.7.0` | 对应 package.json 中的版本 |
+| `v1.7.1` | 对应 package.json 中的版本 |
 
 > [Releases 页面](https://github.com/QCEnjoyLL/x-downloader-bot/releases) 与镜像版本一一对应。
 

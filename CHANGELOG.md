@@ -1,5 +1,9 @@
 # 更新日志
 
+## v1.7.1
+- `.env` 新增 `HOST_PORT`，可直接配置 Docker Compose 暴露到宿主机的端口
+- `.env` 新增 `COMPOSE_PROFILES` 开关，设为 `local-api` 即启用本地 Telegram Bot API 容器，留空则禁用
+
 ## v1.7.0
 - 修复链接模式处理纯文本或图片推文时引用未定义消息 ID 的错误，并修复损坏的提示字符
 - Docker Compose 默认改用官方 Telegram API；本地 2GB API 改为 `local-api` profile 显式启用
