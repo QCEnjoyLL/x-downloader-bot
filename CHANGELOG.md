@@ -1,5 +1,11 @@
 # 更新日志
 
+## v1.8.1
+- 修复本地 Bot API 容器未启用 `TELEGRAM_LOCAL=1`，导致服务端仍可能拒绝 50MB 以上文件的问题
+- 修复 `COMPOSE_PROFILES=local-api` 只启动本地 API 容器、Bot 却仍按官方 API 的 50MB 上限处理视频的问题
+- 本地 API profile 现在会自动选择 `http://api:8081` 和 2GB 上限，无需重复配置 `TELEGRAM_API_URL`
+- 主页、启动日志和 `/health` 增加当前 Bot API 模式与上传上限信息，便于排查配置
+
 ## v1.8.0
 - Telegram update 改为 SQLite 持久化队列：Webhook 落盘后再确认，轮询重启后可恢复未完成任务，并支持失败重试
 - 下载、直播回放和视频直链统一使用进程级全局并发限制，避免多用户同时请求绕过并发上限

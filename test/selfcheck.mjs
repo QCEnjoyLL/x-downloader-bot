@@ -226,12 +226,21 @@ import { Semaphore } from '../src/limiter.js';
   }
 }
 
-// 7) 官方 API 始终按 50MB，本地/自定义 API 才按 2GB
+// 7) 官方 API 按 50MB；local-api profile 自动切换到本地 API 的 2GB
 {
   const previous = process.env.TELEGRAM_API_URL;
+  const previousProfiles = process.env.COMPOSE_PROFILES;
   try {
     delete process.env.TELEGRAM_API_URL;
+    delete process.env.COMPOSE_PROFILES;
     assert.equal(getMaxVideoSize(), 50 * 1024 * 1024);
+
+    process.env.COMPOSE_PROFILES = 'local-api';
+    assert.equal(getMaxVideoSize(), 2 * 1024 * 1024 * 1024);
+
+    process.env.TELEGRAM_API_URL = '';
+    assert.equal(getMaxVideoSize(), 2 * 1024 * 1024 * 1024, '空 URL 应跟随 local-api profile');
+
     process.env.TELEGRAM_API_URL = 'https://api.telegram.org/';
     assert.equal(getMaxVideoSize(), 50 * 1024 * 1024);
     process.env.TELEGRAM_API_URL = 'http://api:8081';
@@ -239,6 +248,8 @@ import { Semaphore } from '../src/limiter.js';
   } finally {
     if (previous === undefined) delete process.env.TELEGRAM_API_URL;
     else process.env.TELEGRAM_API_URL = previous;
+    if (previousProfiles === undefined) delete process.env.COMPOSE_PROFILES;
+    else process.env.COMPOSE_PROFILES = previousProfiles;
   }
 }
 

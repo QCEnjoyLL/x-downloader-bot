@@ -107,12 +107,11 @@ curl -H "X-Webhook-Setup-Key: 另一段随机字符串" \
 COMPOSE_PROFILES=local-api
 TELEGRAM_API_ID=12345678
 TELEGRAM_API_HASH=abcdef1234567890abcdef1234567890
-TELEGRAM_API_URL=http://api:8081
 
 docker compose up -d
 ```
 
-将 `COMPOSE_PROFILES` 留空并将 `TELEGRAM_API_URL` 留空即可禁用 API 容器，Bot 会使用官方 API。设为 `local-api` 后，普通的 `docker compose up -d` 就会同时启动 API 容器。接近 2GB 的文件虽然采用磁盘流式传输，但仍需预留足够的磁盘空间、上传时间和带宽。
+将 `COMPOSE_PROFILES` 留空即可禁用 API 容器，Bot 会使用官方 API（50MB）。设为 `local-api` 后，普通的 `docker compose up -d` 会同时以 `TELEGRAM_LOCAL=1`（`--local`）模式启动 API 容器，Bot 也会自动切换到 `http://api:8081`（约 2GB），无需再设置 `TELEGRAM_API_URL`。该变量仅用于手动覆盖 API 地址。接近 2GB 的文件虽然采用磁盘流式传输，但仍需预留足够的磁盘空间、上传时间和带宽。
 
 ## 命令
 
@@ -159,7 +158,7 @@ docker compose up -d
 | `COMPOSE_PROFILES` | `local-api` 启用本地 API 容器，留空禁用 | — |
 | `TELEGRAM_API_ID` | 本地 API ID（可选） | — |
 | `TELEGRAM_API_HASH` | 本地 API Hash（可选） | — |
-| `TELEGRAM_API_URL` | API 地址 | `https://api.telegram.org` |
+| `TELEGRAM_API_URL` | API 地址覆盖；留空时根据 `COMPOSE_PROFILES` 自动选择 | 自动 |
 | `WEBHOOK_URL` | 公网 HTTPS Webhook 完整地址 | — |
 | `WEBHOOK_SECRET` | Telegram 请求校验密钥 | — |
 | `WEBHOOK_SETUP_KEY` | `/setup-webhook` 管理入口密钥 | — |
@@ -189,7 +188,7 @@ npm start
 | 标签 | 说明 |
 |------|------|
 | `latest` | 最新版本 |
-| `v1.8.0` | 对应 package.json 中的版本 |
+| `v1.8.1` | 对应 package.json 中的版本 |
 
 > [Releases 页面](https://github.com/QCEnjoyLL/x-downloader-bot/releases) 与镜像版本一一对应。
 

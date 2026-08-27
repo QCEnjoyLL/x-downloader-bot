@@ -6,6 +6,8 @@ services:
     environment:
       TELEGRAM_API_ID: ${TELEGRAM_API_ID:-}
       TELEGRAM_API_HASH: ${TELEGRAM_API_HASH:-}
+      # 必须启用 --local 模式，上传上限才会从 50MB 提升到约 2GB。
+      TELEGRAM_LOCAL: "1"
     volumes:
       - ./telegram-api:/var/lib/telegram-bot-api
     restart: unless-stopped
@@ -32,7 +34,9 @@ services:
       - DEBUG_UPDATES=${DEBUG_UPDATES:-false}
       - BROADCAST_RESOLVER_URL=${BROADCAST_RESOLVER_URL:-}
       - ALLOW_PRIVATE_DOWNLOADS=${ALLOW_PRIVATE_DOWNLOADS:-false}
-      - TELEGRAM_API_URL=${TELEGRAM_API_URL:-https://api.telegram.org}
+      # 传入 profile，让 Bot 在未显式配置 URL 时自动选择本地 API。
+      - COMPOSE_PROFILES=${COMPOSE_PROFILES:-}
+      - TELEGRAM_API_URL=${TELEGRAM_API_URL:-}
       - WEBHOOK_URL=${WEBHOOK_URL:-}
       - WEBHOOK_SECRET=${WEBHOOK_SECRET:-}
       - WEBHOOK_SETUP_KEY=${WEBHOOK_SETUP_KEY:-}

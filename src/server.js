@@ -7,7 +7,9 @@ import {
   setupWebhook,
   getStatusHtml,
   getMediaQueueStats,
-  initializeDownloadStorage
+  initializeDownloadStorage,
+  getTelegramApiStats,
+  getTelegramApiUrl
 } from './index.js';
 import {
   closeJobQueue,
@@ -19,7 +21,7 @@ import {
 const PORT = process.env.PORT || 3000;
 const POLLING = process.env.POLLING !== 'false';
 const BOT_TOKEN = process.env.BOT_TOKEN || '';
-const TELEGRAM_API = process.env.TELEGRAM_API_URL || 'https://api.telegram.org';
+const TELEGRAM_API = getTelegramApiUrl();
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || '';
 const WEBHOOK_SETUP_KEY = process.env.WEBHOOK_SETUP_KEY || '';
 const UPDATE_CONCURRENCY = process.env.UPDATE_CONCURRENCY || 8;
@@ -84,6 +86,7 @@ app.get('/health', (_req, res) => {
   res.json({
     status: 'ok',
     mode: POLLING ? 'polling' : 'webhook',
+    telegram: getTelegramApiStats(),
     jobs: getJobQueueStats(),
     media: getMediaQueueStats()
   });
@@ -96,6 +99,8 @@ const server = app.listen(PORT, async () => {
     process.exit(1);
   }
   console.log('✅ BOT_TOKEN 已配置');
+  const telegramApi = getTelegramApiStats();
+  console.log(`✅ Telegram Bot API: ${telegramApi.mode === 'local' ? '本地 API（2GB）' : '官方 API（50MB）'}`);
   try {
     await initializeDownloadStorage();
   } catch (error) {

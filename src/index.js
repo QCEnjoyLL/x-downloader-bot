@@ -45,8 +45,17 @@ function getBotToken() {
   return process.env.BOT_TOKEN || '';
 }
 
-function getTelegramApiUrl() {
-  return process.env.TELEGRAM_API_URL || 'https://api.telegram.org';
+export function getTelegramApiUrl() {
+  const configuredUrl = (process.env.TELEGRAM_API_URL || '').trim();
+  if (configuredUrl) return configuredUrl.replace(/\/+$/, '');
+
+  const profiles = (process.env.COMPOSE_PROFILES || '')
+    .split(',')
+    .map(profile => profile.trim())
+    .filter(Boolean);
+  return profiles.includes('local-api') || profiles.includes('*')
+    ? 'http://api:8081'
+    : 'https://api.telegram.org';
 }
 
 export function getMaxVideoSize() {
@@ -56,6 +65,15 @@ export function getMaxVideoSize() {
   return apiUrl === 'https://api.telegram.org'
     ? 50 * 1024 * 1024
     : 2 * 1024 * 1024 * 1024;
+}
+
+export function getTelegramApiStats() {
+  const apiUrl = getTelegramApiUrl();
+  const maxUploadBytes = getMaxVideoSize();
+  return {
+    mode: apiUrl === 'https://api.telegram.org' ? 'official' : 'local',
+    maxUploadBytes
+  };
 }
 
 function getDownloadConcurrency() {
@@ -148,6 +166,7 @@ function formatFileSize(bytes) {
 export async function getStatusHtml() {
   const token = getBotToken();
   const polling = process.env.POLLING !== 'false';
+  const telegramApi = getTelegramApiStats();
   const webhookReady = Boolean(process.env.WEBHOOK_SECRET && process.env.WEBHOOK_SETUP_KEY);
   const time = new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' });
   return `<!DOCTYPE html>
@@ -168,6 +187,7 @@ export async function getStatusHtml() {
   <p>机器人运行中！</p>
   <p>时间: ${time}</p>
   <p>BOT_TOKEN 配置状态: ${token ? '已配置' : '未配置'}</p>
+  <p>Telegram Bot API: ${telegramApi.mode === 'local' ? '本地 API（2GB）' : '官方 API（50MB）'}</p>
   <h2>🔧 设置</h2>
   ${token ? `
     <p>运行模式: ${polling ? '轮询（无需 Webhook）' : 'Webhook'}</p>
