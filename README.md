@@ -188,7 +188,7 @@ npm start
 | 标签 | 说明 |
 |------|------|
 | `latest` | 最新版本 |
-| `v1.8.1` | 对应 package.json 中的版本 |
+| `v1.8.2` | 对应 package.json 中的版本 |
 
 > [Releases 页面](https://github.com/QCEnjoyLL/x-downloader-bot/releases) 与镜像版本一一对应。
 

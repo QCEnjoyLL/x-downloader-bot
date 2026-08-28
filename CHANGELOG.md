@@ -1,5 +1,9 @@
 # 更新日志
 
+## v1.8.2
+- 修复 npm `undici` 的 Agent 与 Node 内置 `fetch` 混用导致所有视频落盘下载报 `invalid onRequestStart method` 的问题
+- 安全远程下载现在统一使用同版本的 `undici` fetch 与 Agent，同时保留 DNS rebinding 防护
+
 ## v1.8.1
 - 修复本地 Bot API 容器未启用 `TELEGRAM_LOCAL=1`，导致服务端仍可能拒绝 50MB 以上文件的问题
 - 修复 `COMPOSE_PROFILES=local-api` 只启动本地 API 容器、Bot 却仍按官方 API 的 50MB 上限处理视频的问题

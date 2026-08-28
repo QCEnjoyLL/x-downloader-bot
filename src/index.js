@@ -10,7 +10,7 @@ import { request as httpRequest } from 'node:http';
 import { request as httpsRequest } from 'node:https';
 import { lookup as dnsLookup } from 'node:dns';
 import { isIP } from 'node:net';
-import { Agent } from 'undici';
+import { Agent, fetch as undiciFetch } from 'undici';
 import { getUserMode, setUserMode, getUserQuality, setUserQuality } from './store.js';
 import { Semaphore } from './limiter.js';
 import { capLinks, checkChatAccess } from './access.js';
@@ -140,10 +140,14 @@ async function assertSafeRemoteUrl(url) {
 async function fetchRemote(url, options = {}, redirects = 0) {
   const parsed = await assertSafeRemoteUrl(url);
   const fetchOptions = { ...options, redirect: 'manual' };
+  let fetchImpl = globalThis.fetch;
   if (process.env.ALLOW_PRIVATE_DOWNLOADS !== 'true') {
     fetchOptions.dispatcher = safeRemoteDispatcher;
+    // dispatcher 与 fetch 必须来自同一 Undici 版本。Node 内置 fetch 使用其捆绑版本，
+    // 不能接收 npm undici@8 的 Agent，否则会报 invalid onRequestStart method。
+    fetchImpl = undiciFetch;
   }
-  const response = await fetch(parsed, fetchOptions);
+  const response = await fetchImpl(parsed, fetchOptions);
   if ([301, 302, 303, 307, 308].includes(response.status)) {
     if (redirects >= 5) throw new Error('DOWNLOAD_FAILED: too many redirects');
     const location = response.headers.get('Location');
