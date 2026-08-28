@@ -19,7 +19,7 @@
 - 🧰 Telegram 更新先写入 SQLite 持久化队列，异常重启后自动续跑
 - 🛡️ 支持账户/Chat 白名单、请求限速、单消息链接上限和全局媒体并发
 - 💽 支持下载文件保留期、目录配额和磁盘剩余空间保护
-- 🔄 双重 API（fxtwitter + vxtwitter），自动回退
+- 🔄 双重 API（[fxtwitter](https://github.com/FxEmbed/FxEmbed) + [vxtwitter](https://github.com/dylanpdx/BetterTwitFix)），自动回退
 - 🚀 默认启用本地 Bot API，上传上限约 **2GB**
 - 🐳 Docker 部署，支持 amd64 / arm64
 
