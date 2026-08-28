@@ -13,7 +13,7 @@ import { isIP } from 'node:net';
 import { Readable } from 'node:stream';
 import { getUserMode, setUserMode, getUserQuality, setUserQuality } from './store.js';
 import { Semaphore } from './limiter.js';
-import { capLinks, checkChatAccess } from './access.js';
+import { capLinks, checkTelegramAccess, getAccessConfig } from './access.js';
 import {
   assertDownloadCapacity,
   initializeStorage
@@ -195,6 +195,7 @@ export async function getStatusHtml() {
   const token = getBotToken();
   const polling = process.env.POLLING !== 'false';
   const telegramApi = getTelegramApiStats();
+  const accessConfig = getAccessConfig();
   const webhookReady = Boolean(process.env.WEBHOOK_SECRET && process.env.WEBHOOK_SETUP_KEY);
   const time = new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' });
   return `<!DOCTYPE html>
@@ -216,6 +217,7 @@ export async function getStatusHtml() {
   <p>时间: ${time}</p>
   <p>BOT_TOKEN 配置状态: ${token ? '已配置' : '未配置'}</p>
   <p>Telegram Bot API: ${telegramApi.mode === 'local' ? '本地 API（2GB）' : '官方 API（50MB）'}</p>
+  <p>访问控制: ${accessConfig.allowlistEnabled ? `白名单${accessConfig.allowlistBypassLimits ? '（授权对象不限频率和链接数）' : ''}` : '公开'}</p>
   <h2>🔧 设置</h2>
   ${token ? `
     <p>运行模式: ${polling ? '轮询（无需 Webhook）' : 'Webhook'}</p>
@@ -237,18 +239,19 @@ export async function handleTelegramWebhook(update) {
 
     if (update.message && update.message.text) {
       const chatId = update.message.chat.id;
+      const userId = update.message.from?.id;
       const messageText = update.message.text;
       const replyToMessageId = update.message.message_id;
 
       console.log(`Message received from chat ${chatId}`);
       if (DEBUG_UPDATES) console.log(`Message text: ${messageText}`);
 
-      const access = checkChatAccess(chatId, update.update_id);
+      const access = checkTelegramAccess({ chatId, userId, requestId: update.update_id });
       if (!access.allowed) {
         if (access.reason === 'rate_limited') {
           await sendMessage(chatId, '⏳ 请求过于频繁，请稍后再试。', replyToMessageId);
         } else {
-          console.warn(`Rejected unauthorized chat ${chatId}`);
+          console.warn(`Rejected unauthorized user ${userId ?? 'unknown'} in chat ${chatId}`);
         }
         return;
       }
@@ -288,7 +291,7 @@ export async function handleTelegramWebhook(update) {
       }
 
       // 检查是否包含直播回放链接（x.com/i/broadcasts/ID）— 需 yt-dlp/ffmpeg 合并 HLS
-      const broadcastResult = capLinks(extractBroadcastUrls(messageText));
+      const broadcastResult = capLinks(extractBroadcastUrls(messageText), access.unlimited);
       const broadcastUrls = broadcastResult.urls;
       if (broadcastUrls.length > 0) {
         if (broadcastResult.dropped) {
@@ -300,7 +303,7 @@ export async function handleTelegramWebhook(update) {
       }
 
       // 检查是否包含视频直链（如 video.twimg.com/xxx.mp4）
-      const directResult = capLinks(extractDirectVideoUrls(messageText));
+      const directResult = capLinks(extractDirectVideoUrls(messageText), access.unlimited);
       const directUrls = directResult.urls;
       if (directUrls.length > 0) {
         if (directResult.dropped) {
@@ -318,7 +321,7 @@ export async function handleTelegramWebhook(update) {
       }
 
       // 检查是否包含 Twitter/X 链接
-      const twitterResult = capLinks(extractTwitterUrls(messageText));
+      const twitterResult = capLinks(extractTwitterUrls(messageText), access.unlimited);
       const twitterUrls = twitterResult.urls;
 
       if (twitterUrls.length > 0) {

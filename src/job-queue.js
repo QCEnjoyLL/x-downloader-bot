@@ -53,8 +53,8 @@ for (const row of db.prepare(`SELECT update_id, payload FROM telegram_jobs WHERE
   }
 }
 db.exec(`
-  CREATE INDEX IF NOT EXISTS idx_telegram_jobs_ready_chat
-    ON telegram_jobs(status, chat_key, available_at, created_at);
+  CREATE INDEX IF NOT EXISTS idx_telegram_jobs_ready
+    ON telegram_jobs(status, available_at, created_at);
 `);
 
 // 上次进程非正常退出时，running 任务重新进入队列。
@@ -78,12 +78,6 @@ const insertJob = db.prepare(`
 const selectJob = db.prepare(`
   SELECT job.update_id, job.payload, job.attempts FROM telegram_jobs AS job
   WHERE job.status = 'pending' AND job.available_at <= ?
-    AND NOT EXISTS (
-      SELECT 1 FROM telegram_jobs AS earlier
-      WHERE earlier.chat_key = job.chat_key
-        AND earlier.status IN ('pending', 'running')
-        AND CAST(earlier.update_id AS INTEGER) < CAST(job.update_id AS INTEGER)
-    )
   ORDER BY job.created_at ASC, CAST(job.update_id AS INTEGER) ASC LIMIT 1
 `);
 const markRunning = db.prepare(`

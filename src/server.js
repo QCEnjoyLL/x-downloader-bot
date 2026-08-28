@@ -18,6 +18,7 @@ import {
   getJobQueueStats,
   startUpdateWorkers
 } from './job-queue.js';
+import { getAccessConfig } from './access.js';
 
 const PORT = process.env.PORT || 3000;
 const POLLING = process.env.POLLING !== 'false';
@@ -88,6 +89,7 @@ app.get('/health', (_req, res) => {
     status: 'ok',
     mode: POLLING ? 'polling' : 'webhook',
     telegram: getTelegramApiStats(),
+    access: getAccessConfig(),
     jobs: getJobQueueStats(),
     media: getMediaQueueStats()
   });
@@ -102,6 +104,8 @@ const server = app.listen(PORT, async () => {
   console.log('✅ BOT_TOKEN 已配置');
   const telegramApi = getTelegramApiStats();
   console.log(`✅ Telegram Bot API: ${telegramApi.mode === 'local' ? '本地 API（2GB）' : '官方 API（50MB）'}`);
+  const access = getAccessConfig();
+  console.log(`✅ Access control: ${access.allowlistEnabled ? `allowlist${access.allowlistBypassLimits ? ' (unlimited)' : ''}` : 'public'}`);
   try {
     await initializeDownloadStorage();
   } catch (error) {

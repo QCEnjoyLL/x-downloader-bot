@@ -329,7 +329,7 @@ import { Semaphore } from '../src/limiter.js';
   }
 }
 
-// 11) SQLite update 队列：update_id 幂等、持久化并由 worker 完成
+// 11) SQLite update 队列：update_id 幂等、持久化，同一 Chat 的多条消息也可并发
 {
   const dir = await mkdtemp(join(tmpdir(), 'xbot-jobs-'));
   const previousDb = process.env.JOB_DB_FILE;
@@ -348,19 +348,21 @@ import { Semaphore } from '../src/limiter.js';
     reopened = await import(`../src/job-queue.js?reopen=${Date.now()}`);
     assert.equal(reopened.getJobQueueStats().pending, 2, '重启后应保留未处理任务');
     const processed = [];
-    let sameChatActive = false;
+    let active = 0;
+    let peak = 0;
     reopened.startUpdateWorkers(async update => {
-      assert.equal(sameChatActive, false, '同一 chat 的 update 不应并行');
-      sameChatActive = true;
+      active++;
+      peak = Math.max(peak, active);
       processed.push(update.update_id);
-      await new Promise(resolve => setTimeout(resolve, 30));
-      sameChatActive = false;
+      await new Promise(resolve => setTimeout(resolve, 50));
+      active--;
     }, 2);
     const deadline = Date.now() + 3000;
     while (reopened.getJobQueueStats().completed !== 2 && Date.now() < deadline) {
       await new Promise(resolve => setTimeout(resolve, 20));
     }
     assert.deepEqual(processed, [100, 101]);
+    assert.equal(peak, 2, '同一 Chat 的多条消息应由多个 worker 并发处理');
     assert.equal(reopened.getJobQueueStats().completed, 2);
   } finally {
     if (reopened) await reopened.closeJobQueue();
@@ -390,27 +392,62 @@ import { Semaphore } from '../src/limiter.js';
   }
 }
 
-// 13) 访问控制：chat 白名单、幂等计数、频率限制和链接数量限制
+// 13) 访问控制：账户/Chat 白名单、白名单免限、公开模式限速及 0=无限制
 {
   const previous = {
-    allowed: process.env.ALLOWED_CHAT_IDS,
+    users: process.env.ALLOWED_USER_IDS,
+    chats: process.env.ALLOWED_CHAT_IDS,
+    bypass: process.env.ALLOWLIST_BYPASS_LIMITS,
     requests: process.env.MAX_REQUESTS_PER_MINUTE,
     links: process.env.MAX_LINKS_PER_MESSAGE
   };
-  process.env.ALLOWED_CHAT_IDS = '1,2';
-  process.env.MAX_REQUESTS_PER_MINUTE = '2';
-  process.env.MAX_LINKS_PER_MESSAGE = '2';
-  const access = await import(`../src/access.js?test=${Date.now()}`);
   try {
-    assert.equal(access.checkChatAccess(3, 1).reason, 'not_allowed');
-    assert.equal(access.checkChatAccess(1, 10).allowed, true);
-    assert.equal(access.checkChatAccess(1, 10).allowed, true, '同一 update 重试不应重复计数');
-    assert.equal(access.checkChatAccess(1, 11).allowed, true);
-    assert.equal(access.checkChatAccess(1, 12).reason, 'rate_limited');
-    assert.deepEqual(access.capLinks(['a', 'b', 'c']), { urls: ['a', 'b'], dropped: 1, limit: 2 });
+    process.env.ALLOWED_USER_IDS = '10,20';
+    process.env.ALLOWED_CHAT_IDS = '-100';
+    process.env.ALLOWLIST_BYPASS_LIMITS = 'true';
+    process.env.MAX_REQUESTS_PER_MINUTE = '2';
+    process.env.MAX_LINKS_PER_MESSAGE = '2';
+    const allowlist = await import(`../src/access.js?allowlist=${Date.now()}`);
+    assert.equal(allowlist.checkTelegramAccess({ chatId: 1, userId: 30, requestId: 1 }).reason, 'not_allowed');
+    const trustedUser = allowlist.checkTelegramAccess({ chatId: 1, userId: 10, requestId: 2 });
+    assert.deepEqual(trustedUser, { allowed: true, unlimited: true });
+    assert.deepEqual(
+      allowlist.checkTelegramAccess({ chatId: -100, userId: 30, requestId: 3 }),
+      { allowed: true, unlimited: true },
+      'Chat 白名单仍应可用于授权整个群组'
+    );
+    assert.deepEqual(
+      allowlist.capLinks(['a', 'b', 'c'], trustedUser.unlimited),
+      { urls: ['a', 'b', 'c'], dropped: 0, limit: 0 },
+      '白名单授权对象不应限制链接数量'
+    );
+
+    process.env.ALLOWED_USER_IDS = '';
+    process.env.ALLOWED_CHAT_IDS = '';
+    const open = await import(`../src/access.js?open=${Date.now()}`);
+    assert.equal(open.checkTelegramAccess({ chatId: 3, userId: 30, requestId: 10 }).allowed, true);
+    assert.equal(open.checkTelegramAccess({ chatId: 3, userId: 30, requestId: 10 }).allowed, true, '同一 update 重试不应重复计数');
+    assert.equal(open.checkTelegramAccess({ chatId: 3, userId: 30, requestId: 11 }).allowed, true);
+    assert.equal(open.checkTelegramAccess({ chatId: 3, userId: 30, requestId: 12 }).reason, 'rate_limited');
+    assert.deepEqual(open.capLinks(['a', 'b', 'c']), { urls: ['a', 'b'], dropped: 1, limit: 2 });
+
+    process.env.MAX_REQUESTS_PER_MINUTE = '0';
+    process.env.MAX_LINKS_PER_MESSAGE = '0';
+    const unlimitedOpen = await import(`../src/access.js?unlimited=${Date.now()}`);
+    for (let i = 0; i < 20; i++) {
+      assert.equal(unlimitedOpen.checkTelegramAccess({ chatId: 4, userId: 40, requestId: i }).allowed, true);
+    }
+    assert.deepEqual(
+      unlimitedOpen.capLinks(['a', 'b', 'c']),
+      { urls: ['a', 'b', 'c'], dropped: 0, limit: 0 }
+    );
   } finally {
-    if (previous.allowed === undefined) delete process.env.ALLOWED_CHAT_IDS;
-    else process.env.ALLOWED_CHAT_IDS = previous.allowed;
+    if (previous.users === undefined) delete process.env.ALLOWED_USER_IDS;
+    else process.env.ALLOWED_USER_IDS = previous.users;
+    if (previous.chats === undefined) delete process.env.ALLOWED_CHAT_IDS;
+    else process.env.ALLOWED_CHAT_IDS = previous.chats;
+    if (previous.bypass === undefined) delete process.env.ALLOWLIST_BYPASS_LIMITS;
+    else process.env.ALLOWLIST_BYPASS_LIMITS = previous.bypass;
     if (previous.requests === undefined) delete process.env.MAX_REQUESTS_PER_MINUTE;
     else process.env.MAX_REQUESTS_PER_MINUTE = previous.requests;
     if (previous.links === undefined) delete process.env.MAX_LINKS_PER_MESSAGE;

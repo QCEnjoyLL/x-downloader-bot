@@ -1,5 +1,13 @@
 # 更新日志
 
+## v1.9.0
+- 新增 `ALLOWED_USER_IDS` Telegram 账户白名单，可在私聊和群组中按实际发送者限制 Bot 使用权限
+- 启用用户或 Chat 白名单后，授权对象默认不受请求频率和单消息链接数量限制
+- `MAX_REQUESTS_PER_MINUTE=0` 和 `MAX_LINKS_PER_MESSAGE=0` 现在可显式关闭对应限制
+- 状态页显示当前是公开模式还是白名单模式，但不会泄露白名单 ID
+- `.env.example` 默认启用本地 Bot API；如需改用官方 API，可将 `COMPOSE_PROFILES` 留空
+- 解除同一 Chat 的消息串行限制，连续发送的多条消息可按配置并发下载和上传
+
 ## v1.8.4
 - 本地 Telegram Bot API 镜像恢复为支持多架构的 `aiogram/telegram-bot-api:latest`，自动获得上游修复
 - 继续通过 `TELEGRAM_LOCAL=1` 启用约 2GB 文件上传能力
