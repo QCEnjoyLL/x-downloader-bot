@@ -1,5 +1,9 @@
 # 更新日志
 
+## v1.8.4
+- 本地 Telegram Bot API 镜像恢复为支持多架构的 `aiogram/telegram-bot-api:latest`，自动获得上游修复
+- 继续通过 `TELEGRAM_LOCAL=1` 启用约 2GB 文件上传能力
+
 ## v1.8.3
 - 移除导致视频下载回归的 npm Undici dispatcher 方案，改用 Node 原生 `http`/`https` 流式请求
 - DNS 结果在实际 socket 连接阶段校验，继续阻止私网地址和 DNS rebinding，不再依赖不稳定的 Undici 内部接口

@@ -1,6 +1,6 @@
 services:
   api:
-    image: aiogram/telegram-bot-api:10.2
+    image: aiogram/telegram-bot-api:latest
     container_name: xbot-api
     profiles: ["local-api"]
     environment:
