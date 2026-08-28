@@ -171,7 +171,7 @@ npm test
 npm start
 ```
 
-本地运行要求 Node.js 22.19 或更高版本。自测不需要真实 Bot Token；实际启动和端到端 Telegram 验证需要在 `.env` 中配置 Token。
+本地运行要求 Node.js 22.5 或更高版本。自测不需要真实 Bot Token；实际启动和端到端 Telegram 验证需要在 `.env` 中配置 Token。
 
 ## 稳定性与访问控制
 
@@ -188,7 +188,7 @@ npm start
 | 标签 | 说明 |
 |------|------|
 | `latest` | 最新版本 |
-| `v1.8.2` | 对应 package.json 中的版本 |
+| `v1.8.3` | 对应 package.json 中的版本 |
 
 > [Releases 页面](https://github.com/QCEnjoyLL/x-downloader-bot/releases) 与镜像版本一一对应。
 

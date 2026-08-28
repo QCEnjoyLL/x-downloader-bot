@@ -9,7 +9,8 @@ import {
   getMediaQueueStats,
   initializeDownloadStorage,
   getTelegramApiStats,
-  getTelegramApiUrl
+  getTelegramApiUrl,
+  VERSION
 } from './index.js';
 import {
   closeJobQueue,
@@ -93,7 +94,7 @@ app.get('/health', (_req, res) => {
 });
 
 const server = app.listen(PORT, async () => {
-  console.log(`🤖 X Downloader Bot running on port ${PORT}`);
+  console.log(`🤖 X Downloader Bot v${VERSION} running on port ${PORT}`);
   if (!BOT_TOKEN) {
     console.error('⚠️  BOT_TOKEN 未设置！请检查 .env 文件');
     process.exit(1);

@@ -10,7 +10,7 @@ import { request as httpRequest } from 'node:http';
 import { request as httpsRequest } from 'node:https';
 import { lookup as dnsLookup } from 'node:dns';
 import { isIP } from 'node:net';
-import { Agent, fetch as undiciFetch } from 'undici';
+import { Readable } from 'node:stream';
 import { getUserMode, setUserMode, getUserQuality, setUserQuality } from './store.js';
 import { Semaphore } from './limiter.js';
 import { capLinks, checkChatAccess } from './access.js';
@@ -34,7 +34,7 @@ export async function initializeDownloadStorage() {
 }
 
 // 版本号（从 package.json 读取一次，用于 /start 展示）
-const VERSION = (() => {
+export const VERSION = (() => {
   try { return JSON.parse(readFileSync(join(__dirname, '..', 'package.json'), 'utf-8')).version; }
   catch { return 'unknown'; }
 })();
@@ -105,21 +105,51 @@ function isPrivateAddress(address) {
   return true;
 }
 
-// 在真正建立 socket 时校验 DNS 结果，避免“先检查、后解析”产生 DNS rebinding 窗口。
-const safeRemoteDispatcher = new Agent({
-  connect: {
-    lookup(hostname, options, callback) {
-      dnsLookup(hostname, { all: true, verbatim: true, family: options.family || 0 }, (error, addresses) => {
-        if (error) return callback(error);
-        if (!addresses.length || addresses.some(({ address }) => isPrivateAddress(address))) {
-          return callback(new Error('UNSAFE_URL: private or unresolved host is not allowed'));
-        }
-        const selected = addresses[0];
-        callback(null, selected.address, selected.family);
-      });
+// Node 原生 http/https 的 socket 级 DNS 校验，避免 DNS rebinding，且不依赖 Undici 内部接口。
+function safeRemoteLookup(hostname, options, callback) {
+  const lookupOptions = typeof options === 'number' ? { family: options } : (options || {});
+  const family = lookupOptions.family === 4 || lookupOptions.family === 6
+    ? lookupOptions.family
+    : 0;
+  dnsLookup(hostname, { all: true, verbatim: true, family }, (error, addresses) => {
+    if (error) return callback(error);
+    if (!addresses.length || addresses.some(({ address }) => isPrivateAddress(address))) {
+      return callback(new Error('UNSAFE_URL: private or unresolved host is not allowed'));
     }
-  }
-});
+    if (lookupOptions.all) return callback(null, addresses);
+    const selected = addresses[0];
+    callback(null, selected.address, selected.family);
+  });
+}
+
+export function requestRemoteNative(url, options = {}, lookup = safeRemoteLookup) {
+  const parsed = url instanceof URL ? url : new URL(url);
+  const requestFn = parsed.protocol === 'https:' ? httpsRequest : httpRequest;
+  return new Promise((resolve, reject) => {
+    const request = requestFn(parsed, {
+      method: options.method || 'GET',
+      headers: options.headers,
+      signal: options.signal,
+      lookup
+    }, response => {
+      const status = response.statusCode || 0;
+      resolve({
+        status,
+        ok: status >= 200 && status < 300,
+        headers: {
+          get(name) {
+            const value = response.headers[String(name).toLowerCase()];
+            if (Array.isArray(value)) return value.join(', ');
+            return value === undefined ? null : String(value);
+          }
+        },
+        body: Readable.toWeb(response)
+      });
+    });
+    request.once('error', reject);
+    request.end();
+  });
+}
 
 async function assertSafeRemoteUrl(url) {
   const parsed = new URL(url);
@@ -139,15 +169,9 @@ async function assertSafeRemoteUrl(url) {
 
 async function fetchRemote(url, options = {}, redirects = 0) {
   const parsed = await assertSafeRemoteUrl(url);
-  const fetchOptions = { ...options, redirect: 'manual' };
-  let fetchImpl = globalThis.fetch;
-  if (process.env.ALLOW_PRIVATE_DOWNLOADS !== 'true') {
-    fetchOptions.dispatcher = safeRemoteDispatcher;
-    // dispatcher 与 fetch 必须来自同一 Undici 版本。Node 内置 fetch 使用其捆绑版本，
-    // 不能接收 npm undici@8 的 Agent，否则会报 invalid onRequestStart method。
-    fetchImpl = undiciFetch;
-  }
-  const response = await fetchImpl(parsed, fetchOptions);
+  const response = process.env.ALLOW_PRIVATE_DOWNLOADS === 'true'
+    ? await globalThis.fetch(parsed, { ...options, redirect: 'manual' })
+    : await requestRemoteNative(parsed, options);
   if ([301, 302, 303, 307, 308].includes(response.status)) {
     if (redirects >= 5) throw new Error('DOWNLOAD_FAILED: too many redirects');
     const location = response.headers.get('Location');

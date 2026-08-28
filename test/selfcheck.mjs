@@ -10,6 +10,7 @@ import {
   downloadFileToDisk,
   extractBroadcastUrls,
   getMaxVideoSize,
+  requestRemoteNative,
   runWithLimit,
   selectVideoVariant,
   uploadMultipart,
@@ -218,6 +219,24 @@ import { Semaphore } from '../src/limiter.js';
       '超过限制时应拒绝下载'
     );
     await assert.rejects(stat(oversized), /ENOENT/, '超限文件不应残留在磁盘');
+
+    // 原生安全请求适配器必须支持 HEAD/GET、Web ReadableStream 和自定义 socket lookup。
+    const publicTestUrl = `http://public.test:${server.address().port}/video`;
+    const localTestLookup = (_hostname, options, callback) => {
+      if (options?.all) return callback(null, [{ address: '127.0.0.1', family: 4 }]);
+      callback(null, '127.0.0.1', 4);
+    };
+    const nativeResponse = await requestRemoteNative(publicTestUrl, {}, localTestLookup);
+    assert.equal(nativeResponse.ok, true);
+    assert.equal(nativeResponse.headers.get('content-length'), String(payload.length));
+    const reader = nativeResponse.body.getReader();
+    let nativeBytes = 0;
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      nativeBytes += value.length;
+    }
+    assert.equal(nativeBytes, payload.length, '原生安全请求必须完整流式读取响应');
   } finally {
     if (previousPrivateDownloads === undefined) delete process.env.ALLOW_PRIVATE_DOWNLOADS;
     else process.env.ALLOW_PRIVATE_DOWNLOADS = previousPrivateDownloads;

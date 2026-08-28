@@ -1,5 +1,10 @@
 # 更新日志
 
+## v1.8.3
+- 移除导致视频下载回归的 npm Undici dispatcher 方案，改用 Node 原生 `http`/`https` 流式请求
+- DNS 结果在实际 socket 连接阶段校验，继续阻止私网地址和 DNS rebinding，不再依赖不稳定的 Undici 内部接口
+- 启动日志增加明确版本号，方便确认容器实际运行的镜像版本
+
 ## v1.8.2
 - 修复 npm `undici` 的 Agent 与 Node 内置 `fetch` 混用导致所有视频落盘下载报 `invalid onRequestStart method` 的问题
 - 安全远程下载现在统一使用同版本的 `undici` fetch 与 Agent，同时保留 DNS rebinding 防护
